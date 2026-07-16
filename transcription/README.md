@@ -123,3 +123,53 @@ Beispiel Segment-Zeile:
 
 - Error in --offline mode (Modell nicht im Cache)
   - Modell einmal ohne --offline laden, danach erneut mit --offline starten.
+
+## End-to-End Workflow: Transcript + Word + Schulungsfolien
+
+Neues Orchestrierungs-Skript:
+
+- transcription/build_training_package.py
+
+Dieses Skript erstellt pro Eingabedatei:
+
+1. Transcript (.txt)
+2. Detaillierte Zusammenfassung als Word-Datei (.docx)
+3. Schulungsfolien als PowerPoint (.pptx) mit Visualisierungen
+4. Manifest (.json) mit allen Artefaktpfaden
+
+### Abhaengigkeiten installieren
+
+Im Projektroot:
+
+```powershell
+c:/Users/karen.bugge/GIT/Tools/.venv/Scripts/python.exe -m pip install -r requirements.txt
+```
+
+### Beispielaufrufe
+
+Einzeldatei:
+
+```powershell
+c:/Users/karen.bugge/GIT/Tools/.venv/Scripts/python.exe transcription/build_training_package.py C:/videos/meeting.mkv --model base --max-slides 12
+```
+
+Ordnerverarbeitung mit explizitem Ausgabeordner:
+
+```powershell
+c:/Users/karen.bugge/GIT/Tools/.venv/Scripts/python.exe transcription/build_training_package.py C:/videos --output-dir C:/training_output --model small
+```
+
+Nur lokale Zusammenfassung ohne LLM:
+
+```powershell
+c:/Users/karen.bugge/GIT/Tools/.venv/Scripts/python.exe transcription/build_training_package.py C:/videos/meeting.mkv --no-llm
+```
+
+### GitHub Copilot / GitHub Models fuer Word und PPT
+
+- Standard: lokale Strukturierung plus optionale LLM-Generierung ueber GitHub Models
+- Fuer LLM-Nutzung setze einen Token mit `models:read`, z. B. als `GITHUB_MODELS_TOKEN`, `GITHUB_TOKEN` oder `GH_TOKEN`
+- Optional kann ein Modell ueber `GITHUB_MODELS_MODEL` oder `--llm-model` gesetzt werden, z. B. `openai/gpt-4.1-mini`
+- Optional kann ueber `GITHUB_MODELS_ORG` die Nutzung einer Organisation zugeordnet werden
+- Wenn kein GitHub-Token vorhanden ist oder der API-Aufruf fehlschlaegt, wird automatisch lokal weitergearbeitet
+- Sprache wird standardmaessig automatisch aus dem Transcript abgeleitet (oder ueber --language gesetzt)
