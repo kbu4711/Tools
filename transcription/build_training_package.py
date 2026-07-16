@@ -45,15 +45,24 @@ def _write_text_transcript(
     transcript_text: str,
     media_path: str,
     output_dir: str,
+    output_path: Optional[str] = None,
 ) -> str:
-    base_name = Path(media_path).stem
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    out_path = Path(output_dir) / f"{base_name}_transcript_{timestamp}.txt"
+    if output_path:
+        out_path = Path(output_path)
+    else:
+        base_name = Path(media_path).stem
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        out_path = Path(output_dir) / f"{base_name}_transcript_{timestamp}.txt"
 
     with open(out_path, "w", encoding="utf-8") as handle:
         handle.write(transcript_text.strip())
 
     return str(out_path)
+
+
+def _latest_matching_file(directory: Path, pattern: str) -> Optional[Path]:
+    matches = sorted(directory.glob(pattern), key=lambda p: p.stat().st_mtime, reverse=True)
+    return matches[0] if matches else None
 
 
 def _package_single_media(
@@ -64,79 +73,165 @@ def _package_single_media(
     no_llm: bool,
     llm_model: str,
     max_slides: int,
+    overwrite: bool,
+    with_docs: bool,
 ) -> dict[str, Any]:
     media_stem = _slugify(Path(media_path).stem)
     media_out_dir = Path(output_root) / media_stem
     media_out_dir.mkdir(parents=True, exist_ok=True)
+    base_name = Path(media_path).stem
 
-    print(f"Step: Transcribe | File: {media_path}")
+    transcript_existing = _latest_matching_file(media_out_dir, f"{base_name}_transcript_*.txt")
+    word_existing = _latest_matching_file(media_out_dir, f"{base_name}_summary_*.docx") if with_docs else None
+    ppt_existing = _latest_matching_file(media_out_dir, f"{base_name}_training_slides_*.pptx") if with_docs else None
 
-    result = transcribe(media_path, model=model, language=language)
-    transcript_text = str(result.get("text", "")).strip()
-    segments = result.get("segments", [])
-    segment_lines = _format_segment_lines(segments)
+    transcript_text = ""
+    segment_lines: list[str] = []
+    transcript_path: str
+    transcript_status = "generated"
 
-    transcript_path = _write_text_transcript(
-        transcript_text=transcript_text,
-        media_path=media_path,
-        output_dir=str(media_out_dir),
-    )
+    if transcript_existing and not overwrite:
+        transcript_path = str(transcript_existing)
+        transcript_status = "skipped"
+        print(f"Step: Transcribe | File: {media_path} | SKIPPED (exists, --overwrite disabled): {transcript_path}")
+        transcript_text = transcript_existing.read_text(encoding="utf-8").strip()
+    else:
+        transcript_status = "overwritten" if (overwrite and transcript_existing) else "generated"
+        print(f"Step: Transcribe | File: {media_path}")
+        result = transcribe(media_path, model=model, language=language)
+        transcript_text = str(result.get("text", "")).strip()
+        segments = result.get("segments", [])
+        segment_lines = _format_segment_lines(segments)
+        transcript_path = _write_text_transcript(
+            transcript_text=transcript_text,
+            media_path=media_path,
+            output_dir=str(media_out_dir),
+            output_path=str(transcript_existing) if (overwrite and transcript_existing) else None,
+        )
 
-    summary = build_hybrid_summary(
-        transcript_text=transcript_text,
-        preferred_language=language,
-        use_llm=not no_llm,
-        llm_model=llm_model,
-    )
+    if not transcript_text:
+        raise RuntimeError("Transcript text is empty. Cannot continue with packaging.")
 
-    word_blueprint = None if no_llm else generate_word_blueprint(
-        transcript_text=transcript_text,
-        preferred_language=language,
-        llm_model=llm_model,
-    )
-    ppt_blueprint = None if no_llm else generate_ppt_blueprint(
-        transcript_text=transcript_text,
-        preferred_language=language,
-        max_slides=max_slides,
-        llm_model=llm_model,
-    )
+    summary: Optional[dict[str, Any]] = None
+    word_blueprint: Optional[dict[str, Any]] = None
+    ppt_blueprint: Optional[dict[str, Any]] = None
+    visuals: Optional[dict[str, str]] = None
 
-    visuals = generate_visual_assets(
-        summary=summary,
-        output_dir=str(media_out_dir),
-        base_name=Path(media_path).stem,
-    )
+    def _ensure_summary() -> dict[str, Any]:
+        nonlocal summary
+        if summary is None:
+            summary = build_hybrid_summary(
+                transcript_text=transcript_text,
+                preferred_language=language,
+                use_llm=not no_llm,
+                llm_model=llm_model,
+            )
+        return summary
 
-    print(f"Step: Generate Word | File: {media_path}")
-    word_path = export_summary_to_word(
-        summary=summary,
-        transcript_text=transcript_text,
-        media_path=media_path,
-        output_dir=str(media_out_dir),
-        segment_lines=segment_lines,
-        word_blueprint=word_blueprint,
-    )
+    def _ensure_word_blueprint() -> Optional[dict[str, Any]]:
+        nonlocal word_blueprint
+        if no_llm:
+            return None
+        if word_blueprint is None:
+            word_blueprint = generate_word_blueprint(
+                transcript_text=transcript_text,
+                preferred_language=language,
+                llm_model=llm_model,
+            )
+        return word_blueprint
 
-    print(f"Step: Generate PowerPoint | File: {media_path}")
-    ppt_path = export_training_presentation(
-        summary=summary,
-        media_path=media_path,
-        output_dir=str(media_out_dir),
-        visual_assets=visuals,
-        max_slides=max_slides,
-        ppt_blueprint=ppt_blueprint,
-    )
+    def _ensure_ppt_blueprint() -> Optional[dict[str, Any]]:
+        nonlocal ppt_blueprint
+        if no_llm:
+            return None
+        if ppt_blueprint is None:
+            ppt_blueprint = generate_ppt_blueprint(
+                transcript_text=transcript_text,
+                preferred_language=language,
+                max_slides=max_slides,
+                llm_model=llm_model,
+            )
+        return ppt_blueprint
+
+    def _ensure_visuals() -> dict[str, str]:
+        nonlocal visuals
+        if visuals is None:
+            visuals = generate_visual_assets(
+                summary=_ensure_summary(),
+                output_dir=str(media_out_dir),
+                base_name=Path(media_path).stem,
+            )
+        return visuals
+
+    word_path: Optional[str] = None
+    ppt_path: Optional[str] = None
+    word_status = "disabled"
+    ppt_status = "disabled"
+
+    if with_docs:
+        if word_existing and not overwrite:
+            word_path = str(word_existing)
+            word_status = "skipped"
+            print(f"Step: Generate Word | File: {media_path} | SKIPPED (exists, --overwrite disabled): {word_path}")
+        else:
+            word_status = "overwritten" if (overwrite and word_existing) else "generated"
+            print(f"Step: Generate Word | File: {media_path}")
+            word_path = export_summary_to_word(
+                summary=_ensure_summary(),
+                transcript_text=transcript_text,
+                media_path=media_path,
+                output_dir=str(media_out_dir),
+                segment_lines=segment_lines,
+                word_blueprint=_ensure_word_blueprint(),
+                output_path=str(word_existing) if (overwrite and word_existing) else None,
+            )
+
+        if ppt_existing and not overwrite:
+            ppt_path = str(ppt_existing)
+            ppt_status = "skipped"
+            print(f"Step: Generate PowerPoint | File: {media_path} | SKIPPED (exists, --overwrite disabled): {ppt_path}")
+        else:
+            ppt_status = "overwritten" if (overwrite and ppt_existing) else "generated"
+            print(f"Step: Generate PowerPoint | File: {media_path}")
+            ppt_path = export_training_presentation(
+                summary=_ensure_summary(),
+                media_path=media_path,
+                output_dir=str(media_out_dir),
+                visual_assets=_ensure_visuals(),
+                max_slides=max_slides,
+                ppt_blueprint=_ensure_ppt_blueprint(),
+                output_path=str(ppt_existing) if (overwrite and ppt_existing) else None,
+            )
+    else:
+        print(f"Step: Generate Word | File: {media_path} | SKIPPED (transcript-only mode)")
+        print(f"Step: Generate PowerPoint | File: {media_path} | SKIPPED (transcript-only mode)")
+
+    summary_meta = _ensure_summary() if (summary is not None or (not word_existing or overwrite) or (not ppt_existing or overwrite)) else {}
 
     return {
         "media_path": os.path.abspath(media_path),
-        "language": summary.get("language"),
-        "summary_source": summary.get("source"),
+        "language": summary_meta.get("language"),
+        "summary_source": summary_meta.get("source"),
         "segment_count": len(segment_lines),
         "artifacts": {
             "transcript": os.path.abspath(transcript_path),
-            "word_summary": os.path.abspath(word_path),
-            "slides": os.path.abspath(ppt_path),
-            "visuals": {k: os.path.abspath(v) for k, v in visuals.items()},
+            "word_summary": os.path.abspath(word_path) if word_path else None,
+            "slides": os.path.abspath(ppt_path) if ppt_path else None,
+            "visuals": {k: os.path.abspath(v) for k, v in (visuals or {}).items()},
+        },
+        "steps": {
+            "transcript": {
+                "status": transcript_status,
+                "path": os.path.abspath(transcript_path),
+            },
+            "word": {
+                "status": word_status,
+                "path": os.path.abspath(word_path) if word_path else None,
+            },
+            "slides": {
+                "status": ppt_status,
+                "path": os.path.abspath(ppt_path) if ppt_path else None,
+            },
         },
     }
 
@@ -168,6 +263,8 @@ def build_training_package(args: argparse.Namespace) -> dict[str, Any]:
         "model": args.model,
         "offline": bool(args.offline),
         "llm_enabled": not bool(args.no_llm),
+        "transcript_only": not bool(args.with_docs),
+        "with_docs": bool(args.with_docs),
         "llm_model": llm_model,
         "max_slides": int(args.max_slides),
         "results": [],
@@ -184,12 +281,15 @@ def build_training_package(args: argparse.Namespace) -> dict[str, Any]:
                 no_llm=args.no_llm,
                 llm_model=llm_model,
                 max_slides=args.max_slides,
+                overwrite=args.overwrite,
+                with_docs=args.with_docs,
             )
             manifest["results"].append(package)
             print(f"OK: {media_path}")
             print(f"  transcript: {package['artifacts']['transcript']}")
-            print(f"  word:       {package['artifacts']['word_summary']}")
-            print(f"  slides:     {package['artifacts']['slides']}")
+            if args.with_docs:
+                print(f"  word:       {package['artifacts']['word_summary']}")
+                print(f"  slides:     {package['artifacts']['slides']}")
         except Exception as exc:  # pragma: no cover - top-level resilience
             manifest["failed"].append({"media_path": os.path.abspath(media_path), "error": str(exc)})
             print(f"FAILED: {media_path}: {exc}")
@@ -221,6 +321,22 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-slides", type=int, default=12, help="Maximum number of slides to keep")
     parser.add_argument("--theme", default="standard", help="Reserved parameter for future slide themes")
     parser.add_argument("--no-llm", action="store_true", help="Disable LLM refinement and use local summary only")
+    parser.add_argument(
+        "--transcript-only",
+        action="store_true",
+        default=True,
+        help="Generate only transcript files and skip Word/PowerPoint (default mode)",
+    )
+    parser.add_argument(
+        "--with-docs",
+        action="store_true",
+        help="Also generate Word and PowerPoint artifacts",
+    )
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Overwrite existing transcript/Word/PowerPoint artifacts for each media file (ignores timestamp in existence check)",
+    )
     parser.add_argument(
         "--llm-model",
         default=None,

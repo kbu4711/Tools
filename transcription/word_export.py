@@ -3,10 +3,12 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 import re
+
+from file_timestamps import set_file_times
 
 
 def _safe_lines(items: Any) -> list[str]:
@@ -40,6 +42,7 @@ def export_summary_to_word(
     output_dir: str,
     segment_lines: Optional[list[str]] = None,
     word_blueprint: Optional[dict[str, Any]] = None,
+    output_path: Optional[str] = None,
 ) -> str:
     """Create a structured summary document and return its .docx path."""
     from docx import Document  # type: ignore[import-untyped]
@@ -47,9 +50,12 @@ def export_summary_to_word(
     out_dir = Path(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    base_name = Path(media_path).stem
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    out_path = out_dir / f"{base_name}_summary_{timestamp}.docx"
+    if output_path:
+        out_path = Path(output_path)
+    else:
+        base_name = Path(media_path).stem
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        out_path = out_dir / f"{base_name}_summary_{timestamp}.docx"
 
     topics = _safe_lines(summary.get("topics", []))
     primary_topic = _clean_heading(topics[0], fallback="Transcript") if topics else "Transcript"
@@ -119,5 +125,12 @@ def export_summary_to_word(
                     p.add_run(f"{term}: ").bold = True
                     p.add_run(definition)
 
+    generated_local = datetime.now().astimezone()
+    generated_utc = generated_local.astimezone(timezone.utc)
+    core = doc.core_properties
+    core.created = generated_utc
+    core.modified = generated_utc
+
     doc.save(str(out_path))
+    set_file_times(out_path, generated_local)
     return str(out_path)

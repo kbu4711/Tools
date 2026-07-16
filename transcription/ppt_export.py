@@ -3,9 +3,11 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, cast
+
+from file_timestamps import set_file_times
 
 
 def _as_lines(value: Any, limit: int = 5) -> list[str]:
@@ -265,6 +267,7 @@ def export_training_presentation(
     visual_assets: dict[str, str],
     max_slides: int = 12,
     ppt_blueprint: dict[str, Any] | None = None,
+    output_path: str | None = None,
 ) -> str:
     """Create training slides with diagrams/images and return .pptx path."""
     from pptx import Presentation  # type: ignore[import-untyped]
@@ -274,10 +277,13 @@ def export_training_presentation(
 
     out_dir = Path(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-
     base_name = Path(media_path).stem
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    out_path = out_dir / f"{base_name}_training_slides_{timestamp}.pptx"
+    generated_label = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    if output_path:
+        out_path = Path(output_path)
+    else:
+        out_path = out_dir / f"{base_name}_training_slides_{generated_label}.pptx"
 
     prs = Presentation()
     prs.slide_width = Inches(10)
@@ -286,6 +292,11 @@ def export_training_presentation(
     blueprint = ppt_blueprint if isinstance(ppt_blueprint, dict) else {}
     slide_defs = blueprint.get("slides", []) if isinstance(blueprint.get("slides"), list) else []
     colors = _theme_colors(RGBColor)
+    generated_local = datetime.now().astimezone()
+    generated_utc = generated_local.astimezone(timezone.utc)
+    core = prs.core_properties
+    core.created = generated_utc
+    core.modified = generated_utc
 
     title_slide = prs.slides.add_slide(prs.slide_layouts[0])
     _add_title_background(title_slide, Inches, colors)
@@ -293,7 +304,7 @@ def export_training_presentation(
     _set_placeholder_text(
         title_slide,
         1,
-        str(blueprint.get("subtitle", f"Source: {base_name}\nGenerated: {timestamp}")),
+        str(blueprint.get("subtitle", f"Source: {base_name}\nGenerated: {generated_label}")),
     )
     if len(title_slide.placeholders) > 1:
         subtitle_placeholder = title_slide.placeholders[1]
@@ -369,6 +380,7 @@ def export_training_presentation(
             del prs.slides._sldIdLst[-1]  # pylint: disable=protected-access
 
         prs.save(str(out_path))
+        set_file_times(out_path, generated_local)
         return str(out_path)
 
     agenda = _add_bullet_slide(
@@ -441,4 +453,5 @@ def export_training_presentation(
         del prs.slides._sldIdLst[-1]  # pylint: disable=protected-access
 
     prs.save(str(out_path))
+    set_file_times(out_path, generated_local)
     return str(out_path)
