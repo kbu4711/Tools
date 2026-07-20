@@ -1,170 +1,142 @@
 # -*- coding: utf-8 -*-
-"""Word export for detailed training summaries."""
+"""Word export for transcript-derived Markdown summaries."""
 
 from __future__ import annotations
 
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 import re
 
 try:
     from .file_timestamps import set_file_times
-except ImportError:  # pragma: no cover - script execution fallback
+except ImportError:  # pragma: no cover
     from file_timestamps import set_file_times
 
 
-def _safe_lines(items: Any) -> list[str]:
-    if not isinstance(items, list):
+HEADING_RE = re.compile(r"^(#{1,6})\s+(.*)$")
+GRAPHIC_RE = re.compile(r"^###\s+Suggested Graphic:\s*(.+?)\s*$", re.IGNORECASE)
+INLINE_MD_RE = re.compile(r"(\*\*[^*]+\*\*|__[^_]+__|\*[^*]+\*|_[^_]+_)")
+
+
+def _heading_level(line: str) -> tuple[int, str] | None:
+    match = HEADING_RE.match(line.strip())
+    if not match:
+        return None
+    return len(match.group(1)), match.group(2).strip()
+
+
+
+def _bullet_text(line: str) -> str:
+    stripped = line.strip()
+    if stripped.startswith("- ") or stripped.startswith("* "):
+        return stripped[2:].strip()
+    if re.match(r"^\d+\.\s+", stripped):
+        return re.sub(r"^\d+\.\s+", "", stripped).strip()
+    return stripped
+
+
+
+def _find_matching_visuals(visual_assets: list[dict[str, str]], current_heading: str) -> list[dict[str, str]]:
+    if not current_heading:
         return []
-    return [str(x).strip() for x in items if str(x).strip()]
+    matches: list[dict[str, str]] = []
+    for item in visual_assets:
+        placement = item.get("placement", "")
+        if placement and placement.lower() in current_heading.lower():
+            matches.append(item)
+    return matches
 
 
-def _clean_heading(text: str, fallback: str, max_len: int = 90) -> str:
-    cleaned = re.sub(r"\s+", " ", text).strip(" .:-")
-    if not cleaned:
-        return fallback
-    if len(cleaned) <= max_len:
-        return cleaned
-    return cleaned[: max_len - 3].rstrip() + "..."
+def _add_inline_markdown_runs(paragraph: Any, text: str) -> None:
+    # Render common inline Markdown emphasis as native Word run formatting.
+    pos = 0
+    for match in INLINE_MD_RE.finditer(text):
+        start, end = match.span()
+        if start > pos:
+            paragraph.add_run(text[pos:start])
+
+        token = match.group(0)
+        if (token.startswith("**") and token.endswith("**")) or (token.startswith("__") and token.endswith("__")):
+            run = paragraph.add_run(token[2:-2])
+            run.bold = True
+        elif (token.startswith("*") and token.endswith("*")) or (token.startswith("_") and token.endswith("_")):
+            run = paragraph.add_run(token[1:-1])
+            run.italic = True
+        else:
+            paragraph.add_run(token)
+        pos = end
+
+    if pos < len(text):
+        paragraph.add_run(text[pos:])
 
 
-def _extract_segment_text(segment_line: str) -> str:
-    # Segment lines are formatted like: [00012.34s - 00018.90s] text
-    return re.sub(r"^\[[^\]]+\]\s*", "", segment_line).strip()
 
-
-def _chunk_list(items: list[str], size: int) -> list[list[str]]:
-    return [items[idx : idx + size] for idx in range(0, len(items), size)]
-
-
-def _section_labels(language: str) -> dict[str, str]:
-    if language == "de":
-        return {
-            "generated": "Erstellt",
-            "overview": "Kurzueberblick",
-            "concepts": "Kapitel",
-            "takeaways": "Wichtige Punkte",
-            "transcript": "Vollstaendiges Transkript",
-            "no_overview": "Kein Kurzueberblick verfuegbar.",
-            "no_concepts": "Keine wesentlichen Inhalte extrahiert.",
-            "no_takeaways": "Keine wichtigen Punkte identifiziert.",
-        }
-    return {
-        "generated": "Generated",
-        "overview": "Brief Summary",
-        "concepts": "Chapters",
-        "takeaways": "Key Points",
-        "transcript": "Complete Transcript",
-        "no_overview": "No brief summary available.",
-        "no_concepts": "No key content extracted.",
-        "no_takeaways": "No key points identified.",
-    }
-
-
-def export_summary_to_word(
-    summary: dict[str, Any],
-    transcript_text: str,
-    media_path: str,
-    output_dir: str,
-    segment_lines: Optional[list[str]] = None,
-    word_blueprint: Optional[dict[str, Any]] = None,
-    output_path: Optional[str] = None,
-) -> str:
-    """Create a structured summary document and return its .docx path."""
+def export_summary_to_word(markdown_text: str, media_path: str, output_dir: str, visual_assets: list[dict[str, str]] | None = None, output_path: str | None = None) -> str:
     from docx import Document  # type: ignore[import-untyped]
+    from docx.shared import Inches  # type: ignore[import-untyped]
 
     out_dir = Path(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    language = str(summary.get("language", "en")).lower()
-    labels = _section_labels(language)
-
-    if output_path:
-        out_path = Path(output_path)
-    else:
-        base_name = Path(media_path).stem
-        lang_code = language.lower() if language else "en"
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        out_path = out_dir / f"{base_name}_summary_{lang_code}_{timestamp}.docx"
-
-    topics = _safe_lines(summary.get("topics", []))
-    primary_topic = _clean_heading(topics[0], fallback="Transcript") if topics else "Transcript"
-    blueprint = word_blueprint if isinstance(word_blueprint, dict) else {}
-    title = str(blueprint.get("title", f"Detailed Summary: {primary_topic}")).strip()
-    subtitle = str(blueprint.get("subtitle", f"Document: {Path(media_path).name}")).strip()
-    overview_lines = _safe_lines(blueprint.get("overview", [])) or _safe_lines(summary.get("overview", []))
-    takeaways = _safe_lines(blueprint.get("takeaways", [])) or _safe_lines(summary.get("goals", []))
-    sections = blueprint.get("sections", []) if isinstance(blueprint.get("sections"), list) else []
+    base_name = Path(media_path).stem
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    out_path = Path(output_path) if output_path else out_dir / f"{base_name}_summary_generated_{timestamp}.docx"
 
     doc = Document()
-    doc.add_heading(title, level=0)
-    doc.add_paragraph(subtitle)
-    doc.add_paragraph(f"{labels['generated']}: {datetime.now().isoformat(timespec='seconds')} | Summary source: {summary.get('source', 'local')}")
+    current_heading = ""
+    inserted_visuals: set[str] = set()
+    visual_assets = visual_assets or []
 
-    doc.add_heading(labels["overview"], level=1)
-    if overview_lines:
-        for line in overview_lines:
-            doc.add_paragraph(line)
-    else:
-        doc.add_paragraph(labels["no_overview"])
+    for raw_line in markdown_text.splitlines():
+        line = raw_line.rstrip()
+        stripped = line.strip()
+        if not stripped:
+            continue
 
-    doc.add_heading(labels["concepts"], level=1)
+        heading = _heading_level(stripped)
+        if heading:
+            level, text = heading
+            current_heading = text
+            if level == 1:
+                doc.add_heading(text, level=0)
+            else:
+                doc.add_heading(text, level=min(level - 1, 4))
+            for visual in _find_matching_visuals(visual_assets, current_heading):
+                path = visual.get("path", "")
+                if path and path not in inserted_visuals and Path(path).exists():
+                    doc.add_picture(path, width=Inches(6.5))
+                    inserted_visuals.add(path)
+            continue
 
-    if sections:
-        for idx, section in enumerate(sections, start=1):
-            if not isinstance(section, dict):
-                continue
-            section_title = _clean_heading(str(section.get("heading", "")), fallback=f"Concept {idx}")
-            doc.add_heading(f"{idx}. {section_title}", level=2)
-            bullets = _safe_lines(section.get("bullets", []))
-            for bullet in bullets:
-                doc.add_paragraph(bullet, style="List Bullet")
-    else:
-        concept_blocks: list[str] = []
-        concept_blocks.extend(_safe_lines(summary.get("topics", [])))
-        concept_blocks.extend(_safe_lines(summary.get("processes", [])))
-        concept_blocks.extend(_safe_lines(summary.get("risks", [])))
-        concept_blocks.extend(_safe_lines(summary.get("actions", [])))
-        if concept_blocks:
-            for idx, concept in enumerate(concept_blocks, start=1):
-                section_title = _clean_heading(concept, fallback=f"Concept {idx}")
-                doc.add_heading(f"{idx}. {section_title}", level=2)
-                doc.add_paragraph(concept)
-        else:
-            doc.add_paragraph(labels["no_concepts"])
+        if GRAPHIC_RE.match(stripped):
+            doc.add_heading(stripped.replace("### ", ""), level=3)
+            continue
 
-    doc.add_heading(labels["takeaways"], level=1)
-    takeaway_candidates = takeaways
-    if not takeaway_candidates:
-        takeaway_candidates = overview_lines
-    if takeaway_candidates:
-        for line in takeaway_candidates[:8]:
-            doc.add_paragraph(line, style="List Bullet")
-    else:
-        doc.add_paragraph(labels["no_takeaways"])
+        if stripped.startswith("- ") or stripped.startswith("* ") or re.match(r"^\d+\.\s+", stripped):
+            bullet_paragraph = doc.add_paragraph(style="List Bullet")
+            _add_inline_markdown_runs(bullet_paragraph, _bullet_text(stripped))
+            continue
 
-    doc.add_heading(labels["transcript"], level=1)
-    for line in transcript_text.splitlines():
-        doc.add_paragraph(line)
+        paragraph = doc.add_paragraph()
+        _add_inline_markdown_runs(paragraph, stripped)
 
-    doc.add_heading("Summary (Exam-Style)", level=1)
-    glossary = summary.get("glossary", [])
-    if isinstance(glossary, list) and glossary:
-        for item in glossary[:10]:
-            if isinstance(item, dict):
-                term = str(item.get("term", "")).strip()
-                definition = str(item.get("definition", "")).strip()
-                if term:
-                    p = doc.add_paragraph(style="List Bullet")
-                    p.add_run(f"{term}: ").bold = True
-                    p.add_run(definition)
+    for visual in visual_assets:
+        path = visual.get("path", "")
+        if path and path not in inserted_visuals and Path(path).exists():
+            doc.add_heading(visual.get("title", "Suggested Graphic"), level=2)
+            doc.add_picture(path, width=Inches(6.5))
+            inserted_visuals.add(path)
 
     generated_local = datetime.now().astimezone()
     generated_utc = generated_local.astimezone(timezone.utc)
     core = doc.core_properties
     core.created = generated_utc
     core.modified = generated_utc
-
-    doc.save(str(out_path))
+    try:
+        doc.save(str(out_path))
+    except PermissionError:
+        fallback_path = out_dir / f"{base_name}_summary_generated_{datetime.now().strftime('%Y%m%d_%H%M%S')}.docx"
+        doc.save(str(fallback_path))
+        out_path = fallback_path
     set_file_times(out_path, generated_local)
     return str(out_path)

@@ -5,8 +5,7 @@ transcription/*.pptx
 build
 __pycache__
 transcription/__pycache__/*.pyc
-transcription/__pycache__/ppt_export.cpython-314.pyc
-transcription/__pycache__/word_export.cpython-314.pyc
+transcription/_ts_meta_test/*
 dist/transcribe.zip
 dist/training_package/_internal/*
 dist/training_package/*.exe

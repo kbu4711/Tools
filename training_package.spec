@@ -11,9 +11,8 @@ a = Analysis(
     hiddenimports=[
         'whisper',
         'torch',
-        'pptx',
         'docx',
-        'PIL',
+        'pptx',
         'matplotlib',
         'numpy',
         'scipy',

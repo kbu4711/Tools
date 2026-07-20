@@ -124,9 +124,9 @@ Beispiel Segment-Zeile:
 - Error in --offline mode (Modell nicht im Cache)
   - Modell einmal ohne --offline laden, danach erneut mit --offline starten.
 
-## End-to-End Workflow: Transcript (Default) + optionale Dokumente
+## End-to-End Workflow: Transcript + optionale Dokumente
 
-Neues Orchestrierungs-Skript:
+Orchestrierungs-Skript:
 
 - transcription/build_training_package.py
 
@@ -135,15 +135,15 @@ Dieses Skript erstellt pro Eingabedatei standardmaessig:
 1. Transcript (.txt)
 2. Manifest (.json) mit Artefaktpfaden und Schrittstatus
 
-Optional (nur mit --with-docs):
+Optional (nur mit `--with-docs`):
 
-1. Detaillierte Zusammenfassung als Word-Datei (.docx)
-2. Schulungsfolien als PowerPoint (.pptx) mit Visualisierungen
+1. Zusammenfassung als Word-Datei (.docx)
+2. Genau eine PowerPoint-Folie als .pptx
 
 Hinweis zu existierenden Dateien:
 
-- Mit `--overwrite` werden vorhandene Ergebnisse (Transcript/Word/PPT) ueberschrieben.
-- Ohne `--overwrite` werden bereits vorhandene Schritte uebersprungen.
+- Mit `--overwrite` werden vorhandene Transcript-Dateien ueberschrieben.
+- Ohne `--overwrite` werden bereits vorhandene Transcript-Schritte uebersprungen.
 
 ### Abhaengigkeiten installieren
 
@@ -155,22 +155,16 @@ c:/Users/karen.bugge/GIT/Tools/.venv/Scripts/python.exe -m pip install -r requir
 
 ### Beispielaufrufe
 
-Nur Transcript (Default):
+Nur Transcript erzeugen:
 
 ```powershell
-c:/Users/karen.bugge/GIT/Tools/.venv/Scripts/python.exe transcription/build_training_package.py C:/videos/meeting.mkv
+c:/Users/karen.bugge/GIT/Tools/.venv/Scripts/python.exe transcription/build_training_package.py C:/videos/meeting.mkv --model base
 ```
 
-Transcript + Word + PPT:
+Transcript + Word + PowerPoint:
 
 ```powershell
-c:/Users/karen.bugge/GIT/Tools/.venv/Scripts/python.exe transcription/build_training_package.py C:/videos/meeting.mkv --with-docs --model base --max-slides 12
-```
-
-Einzeldatei:
-
-```powershell
-c:/Users/karen.bugge/GIT/Tools/.venv/Scripts/python.exe transcription/build_training_package.py C:/videos/meeting.mkv --with-docs --model base --max-slides 12
+c:/Users/karen.bugge/GIT/Tools/.venv/Scripts/python.exe transcription/build_training_package.py C:/videos/meeting.mkv --with-docs --model base
 ```
 
 Ordnerverarbeitung mit explizitem Ausgabeordner:
@@ -179,22 +173,10 @@ Ordnerverarbeitung mit explizitem Ausgabeordner:
 c:/Users/karen.bugge/GIT/Tools/.venv/Scripts/python.exe transcription/build_training_package.py C:/videos --output-dir C:/training_output --model small
 ```
 
-Ordnerverarbeitung mit Ueberschreiben vorhandener Ergebnisse:
-
-```powershell
-c:/Users/karen.bugge/GIT/Tools/.venv/Scripts/python.exe transcription/build_training_package.py C:/videos --with-docs --output-dir C:/training_output --overwrite
-```
-
-Nur lokale Zusammenfassung ohne LLM:
-
-```powershell
-c:/Users/karen.bugge/GIT/Tools/.venv/Scripts/python.exe transcription/build_training_package.py C:/videos/meeting.mkv --with-docs --no-llm
-```
-
 Existierende Ergebnisse ueberschreiben:
 
 ```powershell
-c:/Users/karen.bugge/GIT/Tools/.venv/Scripts/python.exe transcription/build_training_package.py C:/videos/meeting.mkv --with-docs --overwrite
+c:/Users/karen.bugge/GIT/Tools/.venv/Scripts/python.exe transcription/build_training_package.py C:/videos/meeting.mkv --overwrite
 ```
 
 ### Optionen des Orchestrierungs-Skripts
@@ -206,26 +188,28 @@ c:/Users/karen.bugge/GIT/Tools/.venv/Scripts/python.exe transcription/build_trai
 | --language | String | auto | Sprach-Override, z. B. de oder en |
 | --output-dir | Pfad | input_parent/training_package_output | Zielordner fuer Artefakte |
 | --offline | Flag | false | Verhindert Modell-Download |
-| --max-slides | Zahl | 12 | Maximale Folienanzahl (nur mit --with-docs) |
-| --theme | String | standard | Reserviert fuer zukuenftige Themes |
-| --no-llm | Flag | false | Deaktiviert LLM-Refinement (nur relevant mit --with-docs) |
-| --with-docs | Flag | false | Erzeugt zusaetzlich Word und PowerPoint |
-| --overwrite | Flag | false | Ueberschreibt vorhandene Ergebnisse statt Schritte zu ueberspringen |
+| --with-docs | Flag | false | Erzeugt zusaetzlich Word und PowerPoint aus dem Transcript |
+| --no-llm | Flag | false | Deaktiviert LLM-Erzeugung; Word/PPT werden dann uebersprungen |
 | --llm-model | String | env/default | GitHub Models Modell-ID |
+| --overwrite | Flag | false | Ueberschreibt vorhandene Transcript-/Word-/PPT-Ergebnisse statt Schritte zu ueberspringen |
 
 - --with-docs
-  - Aktiviert zusaetzlich Word- und PowerPoint-Generierung.
-  - Ohne diese Option werden nur Transcript + Manifest erzeugt.
+  - Aktiviert zusaetzlich die Erzeugung von Word und PowerPoint.
+  - Grundlage ist ausschliesslich das Transcript.
+
+- --no-llm
+  - Deaktiviert LLM-Erzeugung.
+  - In diesem Fall werden Word und PPT nicht erstellt.
+
+- --llm-model
+  - Ueberschreibt `GITHUB_MODELS_MODEL` aus `.env`.
+  - Beispiel: `openai/gpt-4.1-mini`
 
 - --overwrite
   - Prueft je Schritt (Transcript, Word, PPT), ob bereits eine passende Datei existiert.
   - Der Zeitstempel im Dateinamen wird bei der Existenzpruefung ignoriert.
   - overwrite=false (Standard): Schritt wird uebersprungen und gemeldet.
   - overwrite=true: Schritt wird ausgefuehrt und vorhandene Datei wird ueberschrieben.
-
-- --no-llm
-  - Deaktiviert LLM-Refinement fuer Summary/Blueprints.
-  - Relevant nur zusammen mit --with-docs.
 
 ### Manifest-Status pro Schritt
 
@@ -234,14 +218,99 @@ Im Manifest steht pro Datei unter results[].steps der Schrittstatus:
 - generated
 - overwritten
 - skipped
-- disabled (bei Word/PPT im Transcript-Only-Default)
 
-### GitHub Copilot / GitHub Models fuer Word und PPT
+### LLM-Verhalten fuer Word und PPT
 
-- Word/PPT werden nur mit --with-docs erzeugt.
-- Standard: lokale Strukturierung plus optionale LLM-Generierung ueber GitHub Models
-- Fuer LLM-Nutzung setze einen Token mit `models:read`, z. B. als `GITHUB_MODELS_TOKEN`, `GITHUB_TOKEN` oder `GH_TOKEN`
-- Optional kann ein Modell ueber `GITHUB_MODELS_MODEL` oder `--llm-model` gesetzt werden, z. B. `openai/gpt-4.1-mini`
-- Optional kann ueber `GITHUB_MODELS_ORG` die Nutzung einer Organisation zugeordnet werden
-- Wenn kein GitHub-Token vorhanden ist oder der API-Aufruf fehlschlaegt, wird automatisch lokal weitergearbeitet
-- Sprache wird standardmaessig automatisch aus dem Transcript abgeleitet (oder ueber --language gesetzt)
+- Word und PPT werden nur mit `--with-docs` erzeugt.
+- Inhaltsquelle ist ausschliesslich das Transcript.
+- Als LLM-Backend wird GitHub Models verwendet.
+- Wenn kein GitHub-Models-Token vorhanden ist oder ein LLM-Aufruf fehlschlaegt, werden Word und PPT uebersprungen; das Transcript wird trotzdem erzeugt.
+- Bei `unavailable_model` wird automatisch ein Fallback-Modell versucht.
+- Bei transienten Fehlern (`429`, `5xx`, Netzwerk, Timeout) werden LLM-Aufrufe mit exponentiellem Backoff erneut versucht.
+- Die PowerPoint-Ausgabe enthaelt genau eine Folie.
+- Grafiken fuer die Word-Datei werden lokal erzeugt, basierend auf den vom LLM beschriebenen Visualisierungen.
+
+Konfigurierbare Umgebungsvariablen:
+
+- `GITHUB_MODELS_MODEL`
+  - Primaeres Modell (Default im Code: `openai/gpt-4.1-mini`).
+- `GITHUB_MODELS_FALLBACK_MODEL`
+  - Fallback-Modell bei `unavailable_model` (Default: `openai/gpt-4.1-mini`).
+- `GITHUB_MODELS_MAX_RETRIES`
+  - Anzahl Retries bei transienten Fehlern (Default: `2`).
+- `GITHUB_MODELS_RETRY_BASE_SECONDS`
+  - Basis-Delay in Sekunden fuer exponentielles Backoff (Default: `1.5`).
+- `GITHUB_MODELS_ORG`
+  - Optionaler Org-spezifischer Endpoint.
+- `TRANSCRIPT_MAX_CHARS`
+  - Maximale Groesse des an das LLM uebergebenen Transcripts in Zeichen.
+  - Default: `10000` (entspricht ca. 2500 Tokens).
+  - Auf `0` oder negative Werte setzen um Begrenzung zu deaktivieren.
+  - Transkripte werden intelligent am Ende eines Satzes gekuerzt fuer besseren Kontext.
+
+## Transcript-Groessenbegrenzung
+
+Beim Erzeugen von Word und PowerPoint wird das Transcript vor der Uebergabe an das LLM auf eine konfigurierbare Maximalgoes begrenzt:
+
+**Warum?**
+- Groessere Transkripte erhoehen die Latenz und Kosten des LLM-Calls.
+- Viele LLMs haben praktische Token-Limits, die beruecksichtigt werden muessen.
+
+**Verhalten:**
+- Standard: max. 10.000 Zeichen (ca. 2.500 Tokens).
+- Truncation erfolgt intelligent am Ende eines Satzes (`.`, `!`, `?`) statt in der Mitte eines Wortes.
+- Das LLM erhaelt eine Notiz, wenn das Transcript gekuerzt wurde.
+- Alle Schritte (Transcript, Word, PPT) werden trotzdem ausgefuehrt; nur die LLM-Eingabe wird begrenzt.
+
+**Konfiguration:**
+
+Zu `.env` hinzufuegen:
+
+```
+TRANSCRIPT_MAX_CHARS=15000
+```
+
+Oder in der Konsole vor dem Aufruf:
+
+```powershell
+$env:TRANSCRIPT_MAX_CHARS = "15000"
+python transcription/build_training_package.py C:/videos/meeting.mkv --with-docs
+```
+
+Begrenzung deaktivieren:
+
+```
+TRANSCRIPT_MAX_CHARS=0
+```
+
+
+
+Dieser Abschnitt beschreibt den technischen Ablauf der Transcript- und optionalen Dokument-Erzeugung.
+
+### 1) Einstieg und Orchestrierung
+
+Der Gesamtfluss startet in `transcription/build_training_package.py`:
+
+1. `build_training_package(...)` sammelt Eingabedateien und laedt das Whisper-Modell.
+2. Pro Mediendatei ruft es `_package_single_media(...)` auf.
+3. In `_package_single_media(...)` werden Schritte sequenziell ausgefuehrt:
+  - Transcript erzeugen oder wiederverwenden
+  - optional Word-Markdown per LLM erzeugen
+  - optionale lokale Grafiken fuer die Word-Datei erzeugen
+  - Word-Datei erzeugen
+  - genau eine PPT-Folie erzeugen
+4. Das Manifest erhaelt pro Schritt Status (`generated`, `overwritten`, `skipped`).
+
+Wichtig:
+- Wenn Dateien existieren und `--overwrite` nicht gesetzt ist, werden Schritte uebersprungen.
+
+### Prompt-Definitionen
+
+Die Prompt-Definitionen liegen in `transcription/summary_builder.py`:
+
+- `WORD_SYSTEM_PROMPT`
+- `WORD_USER_PROMPT_TEMPLATE`
+- `PPT_SYSTEM_PROMPT`
+- `PPT_USER_PROMPT_TEMPLATE`
+
+Die Word-Erzeugung verwendet den festgelegten System- und User-Prompt zur Markdown-Ausgabe fuer die spaetere `.docx`-Erzeugung. Die PPT-Erzeugung verwendet einen separaten System- und User-Prompt fuer genau eine schematische Folie.

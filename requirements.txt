@@ -1,6 +1,6 @@
 openai-whisper
 python-docx
 python-pptx
-matplotlib
 python-dotenv
+matplotlib
 pandas

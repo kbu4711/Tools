@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""End-to-end pipeline: transcript -> detailed Word summary -> training slides."""
+"""End-to-end pipeline: transcript generation plus optional Word and PowerPoint artifacts."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from typing import Any, Optional
 
 from github_models import github_models_enabled, github_models_model
 from ppt_export import export_training_presentation
-from summary_builder import build_hybrid_summary, generate_ppt_blueprint, generate_word_blueprint
+from summary_builder import generate_single_slide_content, generate_word_document_content
 from transcribe_video import _collect_media_files, _load_model, transcribe
 from visuals import generate_visual_assets
 from word_export import export_summary_to_word
@@ -62,6 +62,25 @@ def _write_text_transcript(
     return str(out_path)
 
 
+def _write_markdown_summary(
+    markdown_text: str,
+    media_path: str,
+    output_dir: str,
+    output_path: Optional[str] = None,
+) -> str:
+    if output_path:
+        out_path = Path(output_path)
+    else:
+        base_name = Path(media_path).stem
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        out_path = Path(output_dir) / f"{base_name}_summary_{timestamp}.md"
+
+    with open(out_path, "w", encoding="utf-8") as handle:
+        handle.write(markdown_text.strip())
+
+    return str(out_path)
+
+
 def _latest_matching_file(directory: Path, pattern: str) -> Optional[Path]:
     matches = sorted(directory.glob(pattern), key=lambda p: p.stat().st_mtime, reverse=True)
     return matches[0] if matches else None
@@ -87,11 +106,10 @@ def _package_single_media(
     model: Any,
     output_root: str,
     language: Optional[str],
-    no_llm: bool,
-    llm_model: str,
-    max_slides: int,
     overwrite: bool,
     with_docs: bool,
+    no_llm: bool,
+    llm_model: str,
 ) -> dict[str, Any]:
     media_stem = _slugify(Path(media_path).stem)
     media_out_dir = Path(output_root) / media_stem
@@ -110,10 +128,9 @@ def _package_single_media(
         else:
             lang_for_search = "en"  # Default fallback
 
-    # Search for transcript with matching language
     transcript_existing = _latest_matching_file(media_out_dir, f"{base_name}_transcript_{lang_for_search}_*.txt")
-    word_existing = _latest_matching_file(media_out_dir, f"{base_name}_summary_{lang_for_search}_*.docx") if with_docs else None
-    ppt_existing = _latest_matching_file(media_out_dir, f"{base_name}_training_slides_{lang_for_search}_*.pptx") if with_docs else None
+    word_existing = _latest_matching_file(media_out_dir, f"{base_name}_summary_*_*.docx") if with_docs else None
+    ppt_existing = _latest_matching_file(media_out_dir, f"{base_name}_training_slides_*_*.pptx") if with_docs else None
 
     transcript_text = ""
     segment_lines: list[str] = []
@@ -145,112 +162,116 @@ def _package_single_media(
     if not transcript_text:
         raise RuntimeError("Transcript text is empty. Cannot continue with packaging.")
 
-    summary: Optional[dict[str, Any]] = None
-    word_blueprint: Optional[dict[str, Any]] = None
-    ppt_blueprint: Optional[dict[str, Any]] = None
-    visuals: Optional[dict[str, str]] = None
-
-    def _ensure_summary() -> dict[str, Any]:
-        nonlocal summary
-        if summary is None:
-            summary = build_hybrid_summary(
-                transcript_text=transcript_text,
-                preferred_language=effective_language,
-                use_llm=not no_llm,
-                llm_model=llm_model,
-            )
-        return summary
-
-    def _ensure_word_blueprint() -> Optional[dict[str, Any]]:
-        nonlocal word_blueprint
-        if no_llm:
-            return None
-        if word_blueprint is None:
-            word_blueprint = generate_word_blueprint(
-                transcript_text=transcript_text,
-                preferred_language=effective_language,
-                llm_model=llm_model,
-            )
-        return word_blueprint
-
-    def _ensure_ppt_blueprint() -> Optional[dict[str, Any]]:
-        nonlocal ppt_blueprint
-        if no_llm:
-            return None
-        if ppt_blueprint is None:
-            ppt_blueprint = generate_ppt_blueprint(
-                transcript_text=transcript_text,
-                preferred_language=effective_language,
-                max_slides=max_slides,
-                llm_model=llm_model,
-            )
-        return ppt_blueprint
-
-    def _ensure_visuals() -> dict[str, str]:
-        nonlocal visuals
-        if visuals is None:
-            visuals = generate_visual_assets(
-                summary=_ensure_summary(),
-                output_dir=str(media_out_dir),
-                base_name=Path(media_path).stem,
-            )
-        return visuals
-
     word_path: Optional[str] = None
     ppt_path: Optional[str] = None
+    markdown_path: Optional[str] = None
+    ppt_markdown_path: Optional[str] = None
     word_status = "disabled"
     ppt_status = "disabled"
+    visual_assets: list[dict[str, str]] = []
 
+    llm_available = (not no_llm) and github_models_enabled()
     if with_docs:
-        if word_existing and not overwrite:
-            word_path = str(word_existing)
+        if not llm_available:
             word_status = "skipped"
-            print(f"Step: Generate Word | File: {media_path} | SKIPPED (exists, --overwrite disabled): {word_path}")
-        else:
-            word_status = "overwritten" if (overwrite and word_existing) else "generated"
-            print(f"Step: Generate Word | File: {media_path}")
-            word_path = export_summary_to_word(
-                summary=_ensure_summary(),
-                transcript_text=transcript_text,
-                media_path=media_path,
-                output_dir=str(media_out_dir),
-                segment_lines=segment_lines,
-                word_blueprint=_ensure_word_blueprint(),
-                output_path=str(word_existing) if (overwrite and word_existing) else None,
-            )
-
-        if ppt_existing and not overwrite:
-            ppt_path = str(ppt_existing)
             ppt_status = "skipped"
-            print(f"Step: Generate PowerPoint | File: {media_path} | SKIPPED (exists, --overwrite disabled): {ppt_path}")
+            print(f"Step: Generate Word | File: {media_path} | SKIPPED (no LLM available)")
+            print(f"Step: Generate PowerPoint | File: {media_path} | SKIPPED (no LLM available)")
         else:
-            ppt_status = "overwritten" if (overwrite and ppt_existing) else "generated"
-            print(f"Step: Generate PowerPoint | File: {media_path}")
-            ppt_path = export_training_presentation(
-                summary=_ensure_summary(),
-                media_path=media_path,
-                output_dir=str(media_out_dir),
-                visual_assets=_ensure_visuals(),
-                max_slides=max_slides,
-                ppt_blueprint=_ensure_ppt_blueprint(),
-                output_path=str(ppt_existing) if (overwrite and ppt_existing) else None,
-            )
-    else:
-        print(f"Step: Generate Word | File: {media_path} | SKIPPED (transcript-only mode)")
-        print(f"Step: Generate PowerPoint | File: {media_path} | SKIPPED (transcript-only mode)")
+            try:
+                word_markdown_payload = generate_word_document_content(
+                    transcript_text=transcript_text,
+                    llm_model=llm_model,
+                )
+                ppt_markdown_payload = generate_single_slide_content(
+                    transcript_text=transcript_text,
+                    llm_model=llm_model,
+                )
 
-    summary_meta = _ensure_summary() if (summary is not None or (not word_existing or overwrite) or (not ppt_existing or overwrite)) else {}
+                word_markdown = str((word_markdown_payload or {}).get("markdown", "")).strip()
+                ppt_markdown = str((ppt_markdown_payload or {}).get("markdown", "")).strip()
+
+                if word_markdown:
+                    try:
+                        markdown_path = _write_markdown_summary(
+                            markdown_text=word_markdown,
+                            media_path=media_path,
+                            output_dir=str(media_out_dir),
+                        )
+                        print(f"Step: Export Markdown | File: {media_path}")
+                        visual_assets = generate_visual_assets(
+                            markdown_text=word_markdown,
+                            output_dir=str(media_out_dir),
+                            base_name=base_name,
+                        )
+                        word_status = "overwritten" if (overwrite and word_existing) else "generated"
+                        print(f"Step: Generate Word | File: {media_path}")
+                        word_path = export_summary_to_word(
+                            markdown_text=word_markdown,
+                            media_path=media_path,
+                            output_dir=str(media_out_dir),
+                            visual_assets=visual_assets,
+                            output_path=str(word_existing) if (overwrite and word_existing) else None,
+                        )
+                    except Exception as word_exc:  # pragma: no cover
+                        word_status = "failed"
+                        print(f"Step: Generate Word | File: {media_path} | FAILED: {word_exc}")
+                else:
+                    word_status = "skipped"
+                    print(f"Step: Generate Word | File: {media_path} | SKIPPED (LLM returned no content)")
+
+                if ppt_markdown:
+                    try:
+                        # Save PPT markdown as separate file
+                        ppt_markdown_path = _write_markdown_summary(
+                            markdown_text=ppt_markdown,
+                            media_path=media_path,
+                            output_dir=str(media_out_dir),
+                            output_path=str(media_out_dir / f"{base_name}_slides_spec_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md"),
+                        )
+                        print(f"Step: Export PowerPoint Specification | File: {media_path}")
+                        
+                        ppt_status = "overwritten" if (overwrite and ppt_existing) else "generated"
+                        print(f"Step: Generate PowerPoint | File: {media_path}")
+                        ppt_path = export_training_presentation(
+                            markdown_text=ppt_markdown,
+                            media_path=media_path,
+                            output_dir=str(media_out_dir),
+                            output_path=str(ppt_existing) if (overwrite and ppt_existing) else None,
+                        )
+                    except Exception as ppt_exc:  # pragma: no cover
+                        ppt_status = "failed"
+                        print(f"Step: Generate PowerPoint | File: {media_path} | FAILED: {ppt_exc}")
+                        import traceback
+                        print(f"Traceback: {traceback.format_exc()}")
+                else:
+                    ppt_status = "skipped"
+                    print(f"Step: Generate PowerPoint | File: {media_path} | SKIPPED (LLM returned no content)")
+            except Exception as llm_exc:  # pragma: no cover
+                word_status = "failed"
+                ppt_status = "failed"
+                print(f"Step: LLM generation failed | File: {media_path} | ERROR: {llm_exc}")
+                print(f"Step: Generate Word | File: {media_path} | SKIPPED (LLM failed)")
+                print(f"Step: Generate PowerPoint | File: {media_path} | SKIPPED (LLM failed)")
 
     return {
         "media_path": os.path.abspath(media_path),
-        "language": summary_meta.get("language"),
-        "summary_source": summary_meta.get("source"),
+        "language": effective_language,
         "segment_count": len(segment_lines),
         "artifacts": {
             "transcript": os.path.abspath(transcript_path),
+            "markdown_summary": os.path.abspath(markdown_path) if markdown_path else None,
+            "markdown_ppt": os.path.abspath(ppt_markdown_path) if ppt_markdown_path else None,
             "word_summary": os.path.abspath(word_path) if word_path else None,
             "slides": os.path.abspath(ppt_path) if ppt_path else None,
-            "visuals": {k: os.path.abspath(v) for k, v in (visuals or {}).items()},
+            "visuals": [
+                {
+                    "title": item.get("title", ""),
+                    "placement": item.get("placement", ""),
+                    "path": os.path.abspath(item.get("path", "")) if item.get("path") else "",
+                }
+                for item in visual_assets
+            ],
         },
         "steps": {
             "transcript": {
@@ -280,7 +301,7 @@ def build_training_package(args: argparse.Namespace) -> dict[str, Any]:
     elif github_models_enabled():
         print(f"LLM: enabled | Model: {llm_model} | Source: {llm_model_source}")
     else:
-        print(f"LLM: requested but no GitHub Models token found | Fallback: local generation | Requested model: {llm_model} | Source: {llm_model_source}")
+        print(f"LLM: requested but no GitHub Models token found | Word/PPT will be skipped | Requested model: {llm_model} | Source: {llm_model_source}")
 
     if args.output_dir:
         output_root = Path(args.output_dir)
@@ -295,11 +316,9 @@ def build_training_package(args: argparse.Namespace) -> dict[str, Any]:
         "input_path": os.path.abspath(args.input_path),
         "model": args.model,
         "offline": bool(args.offline),
-        "llm_enabled": not bool(args.no_llm),
-        "transcript_only": not bool(args.with_docs),
         "with_docs": bool(args.with_docs),
+        "llm_enabled": not bool(args.no_llm),
         "llm_model": llm_model,
-        "max_slides": int(args.max_slides),
         "results": [],
         "failed": [],
     }
@@ -311,16 +330,18 @@ def build_training_package(args: argparse.Namespace) -> dict[str, Any]:
                 model=model,
                 output_root=str(output_root),
                 language=args.language,
-                no_llm=args.no_llm,
-                llm_model=llm_model,
-                max_slides=args.max_slides,
                 overwrite=args.overwrite,
                 with_docs=args.with_docs,
+                no_llm=args.no_llm,
+                llm_model=llm_model,
             )
             manifest["results"].append(package)
             print(f"OK: {media_path}")
             print(f"  transcript: {package['artifacts']['transcript']}")
             if args.with_docs:
+                markdown = package['artifacts'].get('markdown_summary')
+                if markdown:
+                    print(f"  markdown:   {markdown}")
                 print(f"  word:       {package['artifacts']['word_summary']}")
                 print(f"  slides:     {package['artifacts']['slides']}")
         except Exception as exc:  # pragma: no cover - top-level resilience
@@ -339,7 +360,7 @@ def build_training_package(args: argparse.Namespace) -> dict[str, Any]:
 
 def _build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Build transcript, detailed Word summary, and training slides from media input."
+        description="Build transcript files and optional Word/PowerPoint artifacts from media input."
     )
     parser.add_argument("input_path", help="Path to media file or folder")
     parser.add_argument(
@@ -351,29 +372,13 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--language", default=None, help="Optional language override, e.g. de or en")
     parser.add_argument("--output-dir", default=None, help="Root output directory for generated artifacts")
     parser.add_argument("--offline", action="store_true", help="Do not allow model download")
-    parser.add_argument("--max-slides", type=int, default=12, help="Maximum number of slides to keep")
-    parser.add_argument("--theme", default="standard", help="Reserved parameter for future slide themes")
-    parser.add_argument("--no-llm", action="store_true", help="Disable LLM refinement and use local summary only")
-    parser.add_argument(
-        "--transcript-only",
-        action="store_true",
-        default=True,
-        help="Generate only transcript files and skip Word/PowerPoint (default mode)",
-    )
-    parser.add_argument(
-        "--with-docs",
-        action="store_true",
-        help="Also generate Word and PowerPoint artifacts",
-    )
+    parser.add_argument("--with-docs", action="store_true", help="Also generate Word and PowerPoint artifacts from the transcript via LLM")
+    parser.add_argument("--no-llm", action="store_true", help="Disable LLM generation and skip Word/PowerPoint artifacts")
+    parser.add_argument("--llm-model", default=None, help="GitHub Models model ID (overrides GITHUB_MODELS_MODEL from .env)")
     parser.add_argument(
         "--overwrite",
         action="store_true",
         help="Overwrite existing transcript/Word/PowerPoint artifacts for each media file (ignores timestamp in existence check)",
-    )
-    parser.add_argument(
-        "--llm-model",
-        default=None,
-        help="GitHub Models model ID (overrides GITHUB_MODELS_MODEL from .env), e.g. openai/gpt-5",
     )
     return parser
 
@@ -381,8 +386,6 @@ def _build_arg_parser() -> argparse.ArgumentParser:
 def main() -> None:
     parser = _build_arg_parser()
     args = parser.parse_args()
-
-    _ = args.theme  # Reserved for compatibility with the agreed CLI contract.
     build_training_package(args)
 
 
