@@ -139,6 +139,18 @@ def _chunk_points(items: list[str], max_items: int) -> list[str]:
     return items[:max_items] if items else []
 
 
+def _matching_sentences(text: str, patterns: list[str], max_items: int = 3) -> list[str]:
+    sentences = _sentences(text)
+    if not sentences:
+        return []
+    matches: list[str] = []
+    for sentence in sentences:
+        lowered = sentence.lower()
+        if any(re.search(pattern, lowered) for pattern in patterns):
+            matches.append(sentence)
+    return _chunk_points(matches, max_items)
+
+
 def _section_titles(language: str) -> dict[str, str]:
     if language == "de":
         return {
@@ -204,66 +216,53 @@ def _build_local_summary(text: str, language: str) -> SummaryResult:
     key_sentences = _chunk_points(sents, 8)
 
     if language == "de":
-        overview = [
-            "Der folgende Inhalt gibt die Aussagen des Transkripts strukturiert und moeglichst nah am Original wieder.",
-            "Die Abschnitte sind inhaltlich gegliedert und nicht als Schulungsunterlage formuliert.",
-            f"Hauefige Begriffe: {', '.join(top_terms) if top_terms else 'keine eindeutigen Top-Begriffe'}.",
-        ]
-        goals = [
-            "Welche zentralen Aussagen werden im Transkript mehrfach betont?",
-            "Welche Themen werden in welcher Reihenfolge behandelt?",
-            "Welche Begriffe oder Entscheidungen sind fuer das Gesamtverstaendnis wesentlich?",
-        ]
-        processes = [
-            "Abfolge der im Transkript beschriebenen Schritte und Entscheidungsstellen.",
-            "Bedingungen fuer Abzweigungen oder alternative Verlaeufe.",
-            "Rueckkehr in den Hauptablauf nach Ausnahmen oder Zusatzschritten.",
-        ]
-        risks = [
-            "Stellen mit unklaren Voraussetzungen oder offenen Annahmen.",
-            "Passagen mit potenziell mehrdeutiger Interpretation.",
-            "Ausnahmen, die den Standardablauf veraendern.",
-        ]
-        actions = [
-            "Explizit genannte Entscheidungen im Prozessverlauf markieren.",
-            "Genannte Optionen und deren Folgen gegeneinander abgrenzen.",
-            "Falls vorhanden: Verantwortliche Rollen aus dem Wortlaut herausstellen.",
-        ]
+        overview = _chunk_points(sents, 3)
+        goals = _matching_sentences(
+            text,
+            [r"\b(ziel|ziele|objective|objectives|purpose|fokus|wichtig)\b"],
+        )
+        processes = _matching_sentences(
+            text,
+            [r"\b(schritt|schritte|prozess|ablauf|zuerst|danach|dann|anschlie\u00dfend|anschließend|before|after|next)\b"],
+        )
+        risks = _matching_sentences(
+            text,
+            [r"\b(risiko|risiken|problem|probleme|warnung|fehler|achtung|issue|risk|problematic)\b"],
+        )
+        actions = _matching_sentences(
+            text,
+            [r"\b(soll|sollte|muss|mussen|müssen|empfehlen|empfohlen|action|act|next step|naechster schritt|nächster schritt)\b"],
+        )
     else:
-        overview = [
-            "The material covers multiple related topics with an operational focus.",
-            "The key content has been transformed into a structured training package.",
-            f"Frequent terms: {', '.join(top_terms) if top_terms else 'no dominant terms detected'}.",
-        ]
-        goals = [
-            "Identify and explain the core concepts confidently.",
-            "Apply process steps in the correct sequence.",
-            "Spot risks early and define practical mitigation actions.",
-        ]
-        processes = [
-            "Capture the initial context and constraints.",
-            "Translate content into actionable workflow steps.",
-            "Review, document, and close the feedback loop.",
-        ]
-        risks = [
-            "Unclear ownership can delay execution.",
-            "Lack of standardization can reduce output quality.",
-            "Incomplete documentation can block knowledge transfer.",
-        ]
-        actions = [
-            "Define clear ownership and decision points.",
-            "Use templates and checklists for repeatability.",
-            "Include regular quality reviews in the workflow.",
-        ]
+        overview = _chunk_points(sents, 3)
+        goals = _matching_sentences(
+            text,
+            [r"\b(goal|goals|objective|objectives|purpose|important|focus)\b"],
+        )
+        processes = _matching_sentences(
+            text,
+            [r"\b(step|steps|process|workflow|first|then|next|after|before)\b"],
+        )
+        risks = _matching_sentences(
+            text,
+            [r"\b(risk|risks|problem|problems|warning|issue|error|challenge|caution)\b"],
+        )
+        actions = _matching_sentences(
+            text,
+            [r"\b(should|must|recommend|recommended|action|next step|need to|needs to)\b"],
+        )
+
+    if not overview:
+        overview = _chunk_points(sents, 3)
 
     topics = _chunk_points(key_sentences, 6)
     glossary = [
         {
             "term": term,
             "definition": (
-                f"Hauefig verwendeter Begriff im Material mit hoher Relevanz fuer die Schulung."
+                f"Im Transkript haeufig verwendeter Begriff."
                 if language == "de"
-                else "Frequently used term in the source material with high relevance for training."
+                else "Frequently used term in the transcript."
             ),
         }
         for term, _ in keywords[:8]
@@ -324,10 +323,11 @@ def _llm_refine_summary(local_summary: SummaryResult, transcript_text: str, llm_
 
     prompt = (
         f"{instruction}. Create a structured, transcript-faithful detailed summary. "
+        "Use only information from the transcript. Do not add external context or invented details. "
         "Do not write a training handout. Keep wording factual and anchored in transcript content. "
         "Return valid JSON with keys: overview, goals, topics, processes, risks, actions, glossary. "
         "All keys must contain arrays. glossary must be an array of objects with keys term and definition. "
-        "Use section-friendly phrasing so the output can be used directly as Word document headings and sub-sections."
+        "Use clear chapter headings and concise section-friendly phrasing. The language must match the transcript language."
     )
 
     output_text = chat_completion(
@@ -335,7 +335,7 @@ def _llm_refine_summary(local_summary: SummaryResult, transcript_text: str, llm_
         messages=[
             {
                 "role": "system",
-                "content": "You transform transcripts into structured, factual detailed summaries for documentation. You give a detailed point-by-point breakdown and add headings if useful.",
+                "content": "You transform transcripts into structured, factual summaries for documentation. You use only transcript content, keep the same language as the transcript, and provide clear chapter headings without inventing details.",
             },
             {
                 "role": "user",
@@ -367,17 +367,17 @@ def generate_word_blueprint(
     instruction = "Antworte auf Deutsch" if language == "de" else "Respond in English"
     model = llm_model or github_models_model()
     prompt = (
-        f"{instruction}. Create JSON for a detailed Word document derived from a transcript. "
-        "Do not create a training handout. Keep it factual, structured, and close to the transcript. "
+        f"{instruction}. Create JSON for a structured Word document derived only from the transcript. "
+        "Do not use external sources and do not invent any content. Keep it factual, easy to read, and in the same language as the transcript. "
         "Return valid JSON with keys: title, subtitle, overview, sections, takeaways. "
-        "overview must be an array of paragraphs. sections must be an array of objects with keys heading and bullets. "
-        "takeaways must be an array of bullet points."
+        "overview must be an array of brief summary paragraphs. sections must be an array of objects with keys heading and bullets. "
+        "Use clear chapter headings. takeaways must be an array of concise bullet points."
     )
 
     output_text = chat_completion(
         model=model,
         messages=[
-            {"role": "system", "content": "You create structured Word document blueprints from transcripts."},
+            {"role": "system", "content": "You create structured Word document blueprints from transcripts only. You keep the same language as the transcript and do not invent details."},
             {"role": "user", "content": f"Transcript:\n{transcript_text[:12000]}\n\n{prompt}"},
         ],
         temperature=0.2,
@@ -400,15 +400,14 @@ def generate_ppt_blueprint(
     instruction = "Antworte auf Deutsch" if language == "de" else "Respond in English"
     model = llm_model or github_models_model()
     prompt = (
-        f"{instruction}. Create JSON for a PowerPoint deck based on a transcript. "
-        "Use a structure similar to a compact German training deck with around 8 to 10 slides: "
-        "title slide, learning objectives/agenda, problem framing, reference scenario, key process or hold state, decision point, comparison of variants, operational concept slide, and closing summary/transfer questions. "
+        f"{instruction}. Create JSON for a concise PowerPoint slide based only on the transcript. "
+        "Do not use external sources and do not invent any content. Keep it didactically understandable and in the same language as the transcript. "
         "Return valid JSON with keys: title, subtitle, slides. "
-        f"slides must contain at most {max_slides} items. "
+        f"slides must contain at most {min(max_slides, 2)} items. "
         "Each slide must be an object with keys: slide_type, title, subtitle, bullets, visual_hint, speaker_notes, callout, labels. "
         "slide_type should be one of: agenda, statement, process, comparison, concept_grid, recap. "
-        "labels should be used for short process steps, comparison headers, or grid labels. "
-        "Keep bullets concise and presentation-ready. Prefer concrete, didactic wording over generic summaries."
+        "Keep the slide content concise, summary-focused, and suitable for a short training slide. "
+        "If no suitable graphic can be derived directly from the transcript, use a simple schematic representation or omit the graphic hint."
     )
 
     output_text = chat_completion(
@@ -416,7 +415,7 @@ def generate_ppt_blueprint(
         messages=[
             {
                 "role": "system",
-                "content": "You create concise but visually structured training slide blueprints from transcripts. Use explicit slide progression and output content suitable for layouted presentation slides.",
+                "content": "You create concise, transcript-only PowerPoint slide blueprints. You keep the same language as the transcript, do not invent details, and only describe graphics that can be directly derived from the transcript.",
             },
             {"role": "user", "content": f"Transcript:\n{transcript_text[:12000]}\n\n{prompt}"},
         ],

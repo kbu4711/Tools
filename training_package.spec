@@ -1,12 +1,23 @@
 # -*- mode: python ; coding: utf-8 -*-
-
+# PyInstaller spec for training_package with Whisper data files included
 
 a = Analysis(
     ['transcription\\build_training_package.py'],
     pathex=[],
     binaries=[],
-    datas=[],
-    hiddenimports=[],
+    datas=[
+        ('.venv\\Lib\\site-packages\\whisper\\assets', 'whisper/assets'),
+    ],
+    hiddenimports=[
+        'whisper',
+        'torch',
+        'pptx',
+        'docx',
+        'PIL',
+        'matplotlib',
+        'numpy',
+        'scipy',
+    ],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

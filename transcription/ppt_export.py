@@ -7,7 +7,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, cast
 
-from file_timestamps import set_file_times
+try:
+    from .file_timestamps import set_file_times
+except ImportError:  # pragma: no cover - script execution fallback
+    from file_timestamps import set_file_times
 
 
 def _as_lines(value: Any, limit: int = 5) -> list[str]:
@@ -35,6 +38,26 @@ def _theme_colors(rgb_color):
         "callout_fill": rgb_color(255, 247, 237),
         "callout_text": rgb_color(154, 52, 18),
         "white": rgb_color(255, 255, 255),
+    }
+
+
+def _slide_labels(language: str) -> dict[str, str]:
+    if language == "de":
+        return {
+            "title": "Schulungsfolien",
+            "agenda": "Agenda",
+            "topic_frequency": "Themenhaeufigkeit",
+            "process_flow": "Ablauf",
+            "drawing": "Schulungsfluss",
+            "qna": "Fragen und naechste Schritte",
+        }
+    return {
+        "title": "Training Slides",
+        "agenda": "Agenda",
+        "topic_frequency": "Topic Frequency",
+        "process_flow": "Process Flow",
+        "drawing": "Training Flow",
+        "qna": "Q&A and Next Steps",
     }
 
 
@@ -279,11 +302,14 @@ def export_training_presentation(
     out_dir.mkdir(parents=True, exist_ok=True)
     base_name = Path(media_path).stem
     generated_label = datetime.now().strftime("%Y%m%d_%H%M%S")
+    language = str(summary.get("language", "en")).lower()
+    labels = _slide_labels(language)
 
     if output_path:
         out_path = Path(output_path)
     else:
-        out_path = out_dir / f"{base_name}_training_slides_{generated_label}.pptx"
+        lang_code = language.lower() if language else "en"
+        out_path = out_dir / f"{base_name}_training_slides_{lang_code}_{generated_label}.pptx"
 
     prs = Presentation()
     prs.slide_width = Inches(10)
@@ -300,7 +326,7 @@ def export_training_presentation(
 
     title_slide = prs.slides.add_slide(prs.slide_layouts[0])
     _add_title_background(title_slide, Inches, colors)
-    _style_slide_title(title_slide, str(blueprint.get("title", "Training Slides")), colors, title_slide=True)
+    _style_slide_title(title_slide, str(blueprint.get("title", labels["title"])), colors, title_slide=True)
     _set_placeholder_text(
         title_slide,
         1,
@@ -385,7 +411,7 @@ def export_training_presentation(
 
     agenda = _add_bullet_slide(
         prs,
-        "Agenda",
+        labels["agenda"],
         [
             titles.get("goals", "Goals"),
             titles.get("topics", "Topics"),
@@ -405,17 +431,17 @@ def export_training_presentation(
 
     if visual_assets.get("top_terms"):
         vis_slide = prs.slides.add_slide(prs.slide_layouts[5])
-        _set_slide_title(vis_slide, "Topic Frequency")
+        _set_slide_title(vis_slide, labels["topic_frequency"])
         vis_slide.shapes.add_picture(visual_assets["top_terms"], Inches(0.6), Inches(1.3), width=Inches(8.8))
 
     if visual_assets.get("process_flow"):
         flow_slide = prs.slides.add_slide(prs.slide_layouts[5])
-        _set_slide_title(flow_slide, "Process Flow")
+        _set_slide_title(flow_slide, labels["process_flow"])
         flow_slide.shapes.add_picture(visual_assets["process_flow"], Inches(0.6), Inches(1.3), width=Inches(8.8))
 
     # Add a simple drawing-based explanation slide (shapes + arrows) as built-in illustration.
     drawing_slide = prs.slides.add_slide(prs.slide_layouts[5])
-    _set_slide_title(drawing_slide, "Training Flow Drawing")
+    _set_slide_title(drawing_slide, labels["drawing"])
 
     box1 = drawing_slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, Inches(0.7), Inches(2.0), Inches(2.4), Inches(1.0))
     box2 = drawing_slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, Inches(3.6), Inches(2.0), Inches(2.4), Inches(1.0))
@@ -443,7 +469,7 @@ def export_training_presentation(
     _set_notes_text(process_slide, "Walk through process steps in execution order.")
 
     closing = prs.slides.add_slide(prs.slide_layouts[1])
-    _set_slide_title(closing, "Q&A and Next Steps")
+    _set_slide_title(closing, labels["qna"])
     _set_placeholder_text(closing, 1, "Questions\nRecap key takeaways\nDefine follow-up actions")
 
     while len(prs.slides) > max_slides:

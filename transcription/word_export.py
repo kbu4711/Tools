@@ -8,7 +8,10 @@ from pathlib import Path
 from typing import Any, Optional
 import re
 
-from file_timestamps import set_file_times
+try:
+    from .file_timestamps import set_file_times
+except ImportError:  # pragma: no cover - script execution fallback
+    from file_timestamps import set_file_times
 
 
 def _safe_lines(items: Any) -> list[str]:
@@ -35,6 +38,30 @@ def _chunk_list(items: list[str], size: int) -> list[list[str]]:
     return [items[idx : idx + size] for idx in range(0, len(items), size)]
 
 
+def _section_labels(language: str) -> dict[str, str]:
+    if language == "de":
+        return {
+            "generated": "Erstellt",
+            "overview": "Kurzueberblick",
+            "concepts": "Kapitel",
+            "takeaways": "Wichtige Punkte",
+            "transcript": "Vollstaendiges Transkript",
+            "no_overview": "Kein Kurzueberblick verfuegbar.",
+            "no_concepts": "Keine wesentlichen Inhalte extrahiert.",
+            "no_takeaways": "Keine wichtigen Punkte identifiziert.",
+        }
+    return {
+        "generated": "Generated",
+        "overview": "Brief Summary",
+        "concepts": "Chapters",
+        "takeaways": "Key Points",
+        "transcript": "Complete Transcript",
+        "no_overview": "No brief summary available.",
+        "no_concepts": "No key content extracted.",
+        "no_takeaways": "No key points identified.",
+    }
+
+
 def export_summary_to_word(
     summary: dict[str, Any],
     transcript_text: str,
@@ -49,13 +76,16 @@ def export_summary_to_word(
 
     out_dir = Path(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
+    language = str(summary.get("language", "en")).lower()
+    labels = _section_labels(language)
 
     if output_path:
         out_path = Path(output_path)
     else:
         base_name = Path(media_path).stem
+        lang_code = language.lower() if language else "en"
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        out_path = out_dir / f"{base_name}_summary_{timestamp}.docx"
+        out_path = out_dir / f"{base_name}_summary_{lang_code}_{timestamp}.docx"
 
     topics = _safe_lines(summary.get("topics", []))
     primary_topic = _clean_heading(topics[0], fallback="Transcript") if topics else "Transcript"
@@ -69,16 +99,16 @@ def export_summary_to_word(
     doc = Document()
     doc.add_heading(title, level=0)
     doc.add_paragraph(subtitle)
-    doc.add_paragraph(f"Generated: {datetime.now().isoformat(timespec='seconds')} | Summary source: {summary.get('source', 'local')}")
+    doc.add_paragraph(f"{labels['generated']}: {datetime.now().isoformat(timespec='seconds')} | Summary source: {summary.get('source', 'local')}")
 
-    doc.add_heading("Overview", level=1)
+    doc.add_heading(labels["overview"], level=1)
     if overview_lines:
         for line in overview_lines:
             doc.add_paragraph(line)
     else:
-        doc.add_paragraph("No overview available.")
+        doc.add_paragraph(labels["no_overview"])
 
-    doc.add_heading("Key Concepts", level=1)
+    doc.add_heading(labels["concepts"], level=1)
 
     if sections:
         for idx, section in enumerate(sections, start=1):
@@ -101,9 +131,9 @@ def export_summary_to_word(
                 doc.add_heading(f"{idx}. {section_title}", level=2)
                 doc.add_paragraph(concept)
         else:
-            doc.add_paragraph("No key concepts extracted.")
+            doc.add_paragraph(labels["no_concepts"])
 
-    doc.add_heading("Main Takeaways", level=1)
+    doc.add_heading(labels["takeaways"], level=1)
     takeaway_candidates = takeaways
     if not takeaway_candidates:
         takeaway_candidates = overview_lines
@@ -111,7 +141,11 @@ def export_summary_to_word(
         for line in takeaway_candidates[:8]:
             doc.add_paragraph(line, style="List Bullet")
     else:
-        doc.add_paragraph("No takeaways identified.")
+        doc.add_paragraph(labels["no_takeaways"])
+
+    doc.add_heading(labels["transcript"], level=1)
+    for line in transcript_text.splitlines():
+        doc.add_paragraph(line)
 
     doc.add_heading("Summary (Exam-Style)", level=1)
     glossary = summary.get("glossary", [])

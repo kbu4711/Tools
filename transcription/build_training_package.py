@@ -45,14 +45,16 @@ def _write_text_transcript(
     transcript_text: str,
     media_path: str,
     output_dir: str,
+    language: str = "en",
     output_path: Optional[str] = None,
 ) -> str:
     if output_path:
         out_path = Path(output_path)
     else:
         base_name = Path(media_path).stem
+        lang_code = language.lower() if language else "en"
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        out_path = Path(output_dir) / f"{base_name}_transcript_{timestamp}.txt"
+        out_path = Path(output_dir) / f"{base_name}_transcript_{lang_code}_{timestamp}.txt"
 
     with open(out_path, "w", encoding="utf-8") as handle:
         handle.write(transcript_text.strip())
@@ -63,6 +65,21 @@ def _write_text_transcript(
 def _latest_matching_file(directory: Path, pattern: str) -> Optional[Path]:
     matches = sorted(directory.glob(pattern), key=lambda p: p.stat().st_mtime, reverse=True)
     return matches[0] if matches else None
+
+
+def _extract_language_from_transcript_filename(filename: str) -> Optional[str]:
+    """Extract language code from transcript filename.
+    Expected format: basename_transcript_LANG_TIMESTAMP.txt
+    Returns the language code (e.g., 'de', 'en') or None if not found."""
+    parts = filename.replace('.txt', '').split('_')
+    # Format: [..., 'transcript', LANG, TIMESTAMP, ...]
+    try:
+        transcript_idx = parts.index('transcript')
+        if transcript_idx + 1 < len(parts):
+            return parts[transcript_idx + 1]
+    except (ValueError, IndexError):
+        pass
+    return None
 
 
 def _package_single_media(
@@ -81,9 +98,22 @@ def _package_single_media(
     media_out_dir.mkdir(parents=True, exist_ok=True)
     base_name = Path(media_path).stem
 
-    transcript_existing = _latest_matching_file(media_out_dir, f"{base_name}_transcript_*.txt")
-    word_existing = _latest_matching_file(media_out_dir, f"{base_name}_summary_*.docx") if with_docs else None
-    ppt_existing = _latest_matching_file(media_out_dir, f"{base_name}_training_slides_*.pptx") if with_docs else None
+    # Determine which language to search for in existing transcripts
+    if language:
+        lang_for_search = language.lower()
+    else:
+        # If no language specified, find any existing transcript and extract its language
+        any_transcript = _latest_matching_file(media_out_dir, f"{base_name}_transcript_*_*.txt")
+        if any_transcript:
+            extracted_lang = _extract_language_from_transcript_filename(any_transcript.name)
+            lang_for_search = extracted_lang or "en"
+        else:
+            lang_for_search = "en"  # Default fallback
+
+    # Search for transcript with matching language
+    transcript_existing = _latest_matching_file(media_out_dir, f"{base_name}_transcript_{lang_for_search}_*.txt")
+    word_existing = _latest_matching_file(media_out_dir, f"{base_name}_summary_{lang_for_search}_*.docx") if with_docs else None
+    ppt_existing = _latest_matching_file(media_out_dir, f"{base_name}_training_slides_{lang_for_search}_*.pptx") if with_docs else None
 
     transcript_text = ""
     segment_lines: list[str] = []
@@ -95,6 +125,7 @@ def _package_single_media(
         transcript_status = "skipped"
         print(f"Step: Transcribe | File: {media_path} | SKIPPED (exists, --overwrite disabled): {transcript_path}")
         transcript_text = transcript_existing.read_text(encoding="utf-8").strip()
+        effective_language = lang_for_search  # Use language from existing file
     else:
         transcript_status = "overwritten" if (overwrite and transcript_existing) else "generated"
         print(f"Step: Transcribe | File: {media_path}")
@@ -106,8 +137,10 @@ def _package_single_media(
             transcript_text=transcript_text,
             media_path=media_path,
             output_dir=str(media_out_dir),
+            language=language or "en",
             output_path=str(transcript_existing) if (overwrite and transcript_existing) else None,
         )
+        effective_language = language or "en"
 
     if not transcript_text:
         raise RuntimeError("Transcript text is empty. Cannot continue with packaging.")
@@ -122,7 +155,7 @@ def _package_single_media(
         if summary is None:
             summary = build_hybrid_summary(
                 transcript_text=transcript_text,
-                preferred_language=language,
+                preferred_language=effective_language,
                 use_llm=not no_llm,
                 llm_model=llm_model,
             )
@@ -135,7 +168,7 @@ def _package_single_media(
         if word_blueprint is None:
             word_blueprint = generate_word_blueprint(
                 transcript_text=transcript_text,
-                preferred_language=language,
+                preferred_language=effective_language,
                 llm_model=llm_model,
             )
         return word_blueprint
@@ -147,7 +180,7 @@ def _package_single_media(
         if ppt_blueprint is None:
             ppt_blueprint = generate_ppt_blueprint(
                 transcript_text=transcript_text,
-                preferred_language=language,
+                preferred_language=effective_language,
                 max_slides=max_slides,
                 llm_model=llm_model,
             )
