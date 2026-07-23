@@ -11,7 +11,7 @@ Use the workspace virtual environment interpreter:
 Install Whisper in the workspace environment:
 
 ```powershell
-c:/Users/karen.bugge/GIT/Tools/.venv/Scripts/python.exe -m pip install --no-cache-dir --upgrade openai_whisper
+c:/Users/karen.bugge/GIT/Tools/.venv/Scripts/python.exe -m pip install --no-cache-dir --upgrade openai_whisper 
 ```
 
 Verify installation:

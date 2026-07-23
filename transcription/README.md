@@ -33,6 +33,10 @@ python transcribe_video.py EINGABE_PFAD
 EINGABE_PFAD kann sein:
 - eine einzelne Video- oder Audio-Datei
 - ein Verzeichnis mit unterstuetzten Medien-Dateien
+- eine OneDrive-/SharePoint-URL auf einen lokal synchronisierten Ordner
+
+Hinweis zur Verzeichnissuche:
+- Bei Verzeichnis-Eingaben werden alle Unterordner rekursiv durchsucht.
 
 Beispiele:
 
@@ -43,15 +47,19 @@ python transcribe_video.py C:/videos
 python transcribe_video.py C:/videos/meeting.mkv --model medium --language de
 python transcribe_video.py C:/videos/meeting.mkv --output-dir C:/transcripts --print
 python transcribe_video.py C:/videos/meeting.mkv --model base --offline
+python transcribe_video.py C:/videos --video-format mp4 --output-dir C:/transcripts
 python transcribe_video.py C:/videos/meeting.mkv --segments
 python transcribe_video.py C:/videos/meeting.mkv --no-segments
+python transcribe_video.py "https://company.sharepoint.com/:f:/r/sites/team/Shared%20Documents/Trainings"
 ```
 
 ## Alle Aufrufoptionen
 ### Positionsargument
 - input_path
-  - Pfad zu einer Video- oder Audio-Datei oder zu einem Verzeichnis mit Medien-Dateien.
+  - Pfad zu einer Video- oder Audio-Datei, zu einem Verzeichnis oder zu einer OneDrive-/SharePoint-URL.
   - Erlaubte Dateiendungen: .mp4, .mkv, .avi, .mov, .webm, .m4v, .mp3, .wav, .m4a, .flac, .aac, .ogg, .opus, .wma
+  - Verzeichnisse werden rekursiv durchsucht.
+  - OneDrive-/SharePoint-URLs muessen lokal synchronisiert sein, damit Dateien verarbeitet werden koennen.
 
 ### Optionale Argumente
 - --model {tiny,base,small,medium,large}
@@ -63,9 +71,13 @@ python transcribe_video.py C:/videos/meeting.mkv --no-segments
   - Sprachcode, z. B. de oder en.
   - Wenn nicht gesetzt, versucht Whisper die Sprache automatisch zu erkennen.
 
+- --video-format VIDEO_FORMAT
+  - Optionaler Filter fuer Verzeichnis-Scans, z. B. mp4.
+  - Bei Angabe werden nur Dateien mit genau diesem Videoformat verarbeitet.
+
 - --output-dir OUTPUT_DIR
   - Zielordner fuer die Ausgabe-Textdatei.
-  - Standard: derselbe Ordner wie die Video-Datei.
+  - Pflichtangabe.
 
 - --print
   - Gibt den kompletten transkribierten Text zusaetzlich in der Konsole aus.
@@ -98,9 +110,10 @@ Beispiel Segment-Zeile:
 
 ## Interner Ablauf (Code-Dokumentation)
 1. main() liest alle CLI-Argumente ein.
-2. _collect_media_files(...) bestimmt, ob input_path eine Datei oder ein Verzeichnis ist.
+2. _collect_media_files(...) bestimmt, ob input_path eine Datei, ein Verzeichnis oder eine OneDrive-/SharePoint-URL ist.
   - Einzeldatei: genau diese Datei wird verarbeitet.
-  - Verzeichnis: alle unterstuetzten Video- und Audio-Dateien werden verarbeitet.
+  - Verzeichnis: alle unterstuetzten Video- und Audio-Dateien werden rekursiv in allen Unterordnern verarbeitet.
+  - OneDrive-/SharePoint-URL: wird auf einen lokal synchronisierten OneDrive-Ordner aufgeloest und danach rekursiv durchsucht.
 3. _load_model(...)
    - prueft ffmpeg-Verfuegbarkeit (ensure_ffmpeg_available)
    - prueft optional Offline-Modellcache (is_model_cached)
@@ -158,13 +171,25 @@ c:/Users/karen.bugge/GIT/Tools/.venv/Scripts/python.exe -m pip install -r requir
 Nur Transcript erzeugen:
 
 ```powershell
-c:/Users/karen.bugge/GIT/Tools/.venv/Scripts/python.exe transcription/build_training_package.py C:/videos/meeting.mkv --model base
+c:/Users/karen.bugge/GIT/Tools/.venv/Scripts/python.exe transcription/build_training_package.py C:/videos/meeting.mkv --output-dir C:/training_output --model base
 ```
 
 Transcript + Word + PowerPoint:
 
 ```powershell
-c:/Users/karen.bugge/GIT/Tools/.venv/Scripts/python.exe transcription/build_training_package.py C:/videos/meeting.mkv --with-docs --model base
+c:/Users/karen.bugge/GIT/Tools/.venv/Scripts/python.exe transcription/build_training_package.py C:/videos/meeting.mkv --output-dir C:/training_output --with-docs --model base
+```
+
+Audio + zusaetzliche bildbasierte Video-Transkription:
+
+```powershell
+c:/Users/karen.bugge/GIT/Tools/.venv/Scripts/python.exe transcription/build_training_package.py C:/videos/meeting.mkv --output-dir C:/training_output --with-video --model base
+```
+
+Nur bildbasierte Video-Transkription:
+
+```powershell
+c:/Users/karen.bugge/GIT/Tools/.venv/Scripts/python.exe transcription/build_training_package.py C:/videos/meeting.mkv --output-dir C:/training_output --video-only --model base
 ```
 
 Ordnerverarbeitung mit explizitem Ausgabeordner:
@@ -173,21 +198,38 @@ Ordnerverarbeitung mit explizitem Ausgabeordner:
 c:/Users/karen.bugge/GIT/Tools/.venv/Scripts/python.exe transcription/build_training_package.py C:/videos --output-dir C:/training_output --model small
 ```
 
+Nur mp4-Dateien in Ordner und Unterordnern verarbeiten:
+
+```powershell
+c:/Users/karen.bugge/GIT/Tools/.venv/Scripts/python.exe transcription/build_training_package.py C:/videos --video-format mp4 --output-dir C:/training_output --model small
+```
+
+OneDrive-URL als Startordner (lokal synchronisiert):
+
+```powershell
+c:/Users/karen.bugge/GIT/Tools/.venv/Scripts/python.exe transcription/build_training_package.py "https://company.sharepoint.com/:f:/r/sites/team/Shared%20Documents/Trainings" --output-dir C:/training_output --model base
+```
+
 Existierende Ergebnisse ueberschreiben:
 
 ```powershell
-c:/Users/karen.bugge/GIT/Tools/.venv/Scripts/python.exe transcription/build_training_package.py C:/videos/meeting.mkv --overwrite
+c:/Users/karen.bugge/GIT/Tools/.venv/Scripts/python.exe transcription/build_training_package.py C:/videos/meeting.mkv --output-dir C:/training_output --overwrite
 ```
 
 ### Optionen des Orchestrierungs-Skripts
 
 | Option | Typ | Default | Beschreibung |
 |---|---|---|---|
-| input_path | Position | - | Pfad zu einer Datei oder einem Ordner mit Medien-Dateien |
+| input_path | Position | - | Pfad zu Datei, Ordner oder OneDrive-/SharePoint-URL (lokal synchronisiert), rekursive Suche in Unterordnern |
 | --model | Auswahl | base | Whisper-Modell: tiny, base, small, medium, large |
 | --language | String | auto | Sprach-Override, z. B. de oder en |
-| --output-dir | Pfad | input_parent/training_package_output | Zielordner fuer Artefakte |
+| --video-format | String | alle unterstuetzten Medienformate | Optionaler Filter fuer Verzeichnis-Scans, z. B. mp4 |
+| --output-dir | Pfad | kein Default (Pflicht) | Zielordner fuer Artefakte |
 | --offline | Flag | false | Verhindert Modell-Download |
+| --with-video | Flag | false | Audio-Transkription plus zusaetzliche bildbasierte Video-Transkription |
+| --video-only | Flag | false | Nur bildbasierte Video-Transkription (ohne Whisper-Audio-Transkription) |
+| --video-interval-seconds | Integer | 8 | Sampling-Intervall fuer Frames bei bildbasierter Transkription |
+| --video-max-frames | Integer | 24 | Maximale Anzahl analysierter Frames bei bildbasierter Transkription |
 | --with-docs | Flag | false | Erzeugt zusaetzlich Word und PowerPoint aus dem Transcript |
 | --no-llm | Flag | false | Deaktiviert LLM-Erzeugung; Word/PPT werden dann uebersprungen |
 | --llm-model | String | env/default | GitHub Models Modell-ID |
@@ -196,6 +238,24 @@ c:/Users/karen.bugge/GIT/Tools/.venv/Scripts/python.exe transcription/build_trai
 - --with-docs
   - Aktiviert zusaetzlich die Erzeugung von Word und PowerPoint.
   - Grundlage ist ausschliesslich das Transcript.
+
+- --with-video
+  - Fuehrt die normale Whisper-Audio-Transkription aus.
+  - Fuehrt zusaetzlich eine bildbasierte Video-Transkription (Frame-Analyse) aus.
+  - Erzeugt zusaetzlich ein kombiniertes Transcript (Audio + Visual).
+
+- Standardmodus (ohne --with-video/--video-only)
+  - Fuehrt primär Audio-Transkription aus.
+  - Falls das Audio-Transcript leer ist, wird automatisch ein bildbasierter Video-Fallback ausgefuehrt.
+  - Fuer diesen Fallback ist ein GitHub Models Token erforderlich.
+
+- --video-only
+  - Ueberspringt Whisper-Audio-Transkription.
+  - Erzeugt das Transcript nur aus Bildinhalten (Frame-Analyse).
+
+- --video-interval-seconds und --video-max-frames
+  - Steuern Aufloesung und Kosten der bildbasierten Analyse.
+  - Kleinere Intervalle bzw. mehr Frames liefern mehr Details, brauchen aber mehr LLM-Aufrufe.
 
 - --no-llm
   - Deaktiviert LLM-Erzeugung.

@@ -11,6 +11,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
+from urllib.parse import unquote, urlparse
 
 try:
     import whisper  # type: ignore[import-untyped]
@@ -39,6 +40,15 @@ SUPPORTED_MEDIA_EXTENSIONS = {
     ".ogg",
     ".opus",
     ".wma",
+}
+
+SUPPORTED_VIDEO_EXTENSIONS = {
+    ".mp4",
+    ".mkv",
+    ".avi",
+    ".mov",
+    ".webm",
+    ".m4v",
 }
 
 
@@ -75,24 +85,179 @@ def _validate_media_extension(path: str) -> None:
         raise ValueError(f"Unsupported media format '{ext}'. Supported formats: {supported}")
 
 
-def _collect_media_files(input_path: str) -> list[str]:
+def _normalize_video_format(video_format: Optional[str]) -> Optional[str]:
+    if not video_format:
+        return None
+    normalized = video_format.strip().lower()
+    if not normalized:
+        return None
+    if not normalized.startswith("."):
+        normalized = f".{normalized}"
+    if normalized not in SUPPORTED_VIDEO_EXTENSIONS:
+        supported = ", ".join(sorted(ext.lstrip(".") for ext in SUPPORTED_VIDEO_EXTENSIONS))
+        raise ValueError(
+            f"Unsupported video format filter '{video_format}'. Supported video formats: {supported}"
+        )
+    return normalized
+
+
+def _onedrive_roots() -> list[Path]:
+    roots: list[Path] = []
+    for var_name in ("OneDrive", "OneDriveCommercial", "OneDriveConsumer"):
+        value = os.environ.get(var_name, "").strip()
+        if value:
+            roots.append(Path(value))
+
+    home = Path.home()
+    default_candidates = [home / "OneDrive"]
+    for candidate in default_candidates:
+        if candidate.exists():
+            roots.append(candidate)
+
+    # De-duplicate while preserving order.
+    unique_roots: list[Path] = []
+    seen: set[str] = set()
+    for root in roots:
+        key = str(root.resolve()) if root.exists() else str(root)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique_roots.append(root)
+    return unique_roots
+
+
+def _resolve_onedrive_input_path(input_path: str) -> str:
+    parsed = urlparse(input_path)
+    if parsed.scheme not in {"http", "https"}:
+        return input_path
+
+    host = (parsed.netloc or "").lower()
+    decoded_path = unquote(parsed.path or "")
+    path_lower = decoded_path.lower()
+    looks_like_onedrive_link = (
+        "onedrive" in host
+        or "sharepoint" in host
+        or "/:f:/r/" in path_lower
+        or "/:u:/r/" in path_lower
+        or "/personal/" in path_lower
+        or "/sites/" in path_lower
+    )
+    if not looks_like_onedrive_link:
+        return input_path
+
+    marker = "/r/"
+    if marker in decoded_path:
+        decoded_path = decoded_path.split(marker, 1)[1]
+    decoded_path = decoded_path.strip("/")
+    if not decoded_path:
+        raise FileNotFoundError(
+            "OneDrive URL konnte nicht in einen lokalen, synchronisierten Ordner aufgeloest werden. "
+            "Bitte pruefe die URL oder verwende den lokalen OneDrive-Pfad direkt."
+        )
+
+    relative_parts = [part for part in decoded_path.split("/") if part]
+
+    # Reduce URL-specific prefixes to path fragments that are likely to exist locally.
+    lowered_parts = [part.lower() for part in relative_parts]
+    for anchor in ("documents", "shared documents"):
+        if anchor in lowered_parts:
+            idx = lowered_parts.index(anchor)
+            relative_parts = [relative_parts[idx]] + relative_parts[idx + 1 :]
+            lowered_parts = [part.lower() for part in relative_parts]
+            break
+
+    if "personal" in lowered_parts and len(relative_parts) >= 3:
+        idx = lowered_parts.index("personal")
+        relative_parts = relative_parts[idx + 2 :]
+        lowered_parts = [part.lower() for part in relative_parts]
+
+    if "sites" in lowered_parts and len(relative_parts) >= 3:
+        idx = lowered_parts.index("sites")
+        relative_parts = relative_parts[idx + 2 :]
+        lowered_parts = [part.lower() for part in relative_parts]
+
+    roots = _onedrive_roots()
+    candidate_variants: list[list[str]] = [relative_parts]
+    if lowered_parts and lowered_parts[0] == "documents":
+        candidate_variants.append(relative_parts[1:])
+    if lowered_parts and lowered_parts[0] == "shared documents":
+        candidate_variants.append(relative_parts[1:])
+
+    for root in roots:
+        for variant in candidate_variants:
+            if not variant:
+                continue
+            candidate = root.joinpath(*variant)
+            if candidate.exists():
+                return str(candidate)
+
+    # Fallback: suffix-based lookup inside OneDrive roots for synced folders with custom names.
+    tail_parts = [part for part in relative_parts if part]
+    if tail_parts:
+        leaf_name = tail_parts[-1]
+        # Try longest suffix first, then relax (e.g. Videos/Clipchamp, then Clipchamp).
+        tail_suffixes: list[list[str]] = []
+        tail_lower_full = [part.lower() for part in tail_parts]
+        for start_idx in range(0, len(tail_lower_full)):
+            suffix = tail_lower_full[start_idx:]
+            if suffix:
+                tail_suffixes.append(suffix)
+
+        for root in roots:
+            try:
+                matches = root.rglob(leaf_name)
+            except Exception:
+                continue
+            for match in matches:
+                if not match.exists():
+                    continue
+                parts_lower = [part.lower() for part in match.parts]
+                for suffix in tail_suffixes:
+                    if len(parts_lower) < len(suffix):
+                        continue
+                    if parts_lower[-len(suffix):] == suffix:
+                        return str(match)
+
+    root_hint = ", ".join(str(item) for item in roots) if roots else "(keine OneDrive-Roots gefunden)"
+    raise FileNotFoundError(
+        "OneDrive URL wurde erkannt, aber kein passender lokaler, synchronisierter Ordner gefunden. "
+        f"Gepruefte OneDrive-Roots: {root_hint}. "
+        "Bitte sicherstellen, dass der Ordner lokal synchronisiert ist oder den lokalen Pfad direkt angeben."
+    )
+
+
+def _collect_media_files(input_path: str, video_format: Optional[str] = None) -> list[str]:
+    normalized_video_format = _normalize_video_format(video_format)
+    input_path = _resolve_onedrive_input_path(input_path)
+
     if not os.path.exists(input_path):
         raise FileNotFoundError(f"Path not found: {input_path}")
 
     if os.path.isfile(input_path):
         _validate_media_extension(input_path)
+        if normalized_video_format:
+            ext = os.path.splitext(input_path)[1].lower()
+            if ext != normalized_video_format:
+                raise ValueError(
+                    f"Input file format '{ext}' does not match requested --video-format '{normalized_video_format}'."
+                )
         return [input_path]
 
     media_files = []
-    for name in sorted(os.listdir(input_path)):
-        full_path = os.path.join(input_path, name)
-        if not os.path.isfile(full_path):
-            continue
-        ext = os.path.splitext(full_path)[1].lower()
-        if ext in SUPPORTED_MEDIA_EXTENSIONS:
-            media_files.append(full_path)
+    for root, _, files in os.walk(input_path):
+        for name in sorted(files):
+            full_path = os.path.join(root, name)
+            ext = os.path.splitext(full_path)[1].lower()
+            if normalized_video_format and ext != normalized_video_format:
+                continue
+            if ext in SUPPORTED_MEDIA_EXTENSIONS:
+                media_files.append(full_path)
 
     if not media_files:
+        if normalized_video_format:
+            raise FileNotFoundError(
+                f"No media files with format '{normalized_video_format}' found in directory: {input_path}"
+            )
         supported = ", ".join(sorted(SUPPORTED_MEDIA_EXTENSIONS))
         raise FileNotFoundError(
             f"No supported media files found in directory: {input_path}. Supported formats: {supported}"
@@ -171,9 +336,14 @@ def main():
         help="Language code, e.g. 'de', 'en' (auto-detect if omitted)",
     )
     parser.add_argument(
-        "--output-dir",
+        "--video-format",
         default=None,
-        help="Directory to write transcript files (default: same as input file)",
+        help="Optional video format filter for directory scans, e.g. mp4",
+    )
+    parser.add_argument(
+        "--output-dir",
+        required=True,
+        help="Directory to write transcript files",
     )
     parser.add_argument(
         "--print",
@@ -202,7 +372,7 @@ def main():
     args = parser.parse_args()
 
     try:
-        media_files = _collect_media_files(args.input_path)
+        media_files = _collect_media_files(args.input_path, video_format=args.video_format)
         model = _load_model(args.model, offline=args.offline)
     except (FileNotFoundError, RuntimeError, ValueError) as exc:
         raise SystemExit(f"Error: {exc}") from exc

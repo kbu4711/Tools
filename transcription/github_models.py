@@ -124,7 +124,7 @@ def _extract_text(payload: dict[str, Any]) -> Optional[str]:
 def chat_completion(
     *,
     model: str,
-    messages: list[dict[str, str]],
+    messages: list[dict[str, Any]],
     temperature: float = 0.2,
     max_tokens: int = 2200,
 ) -> Optional[str]:

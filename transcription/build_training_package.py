@@ -14,6 +14,7 @@ from github_models import github_models_enabled, github_models_model
 from ppt_export import export_training_presentation
 from summary_builder import generate_single_slide_content, generate_word_document_content
 from transcribe_video import _collect_media_files, _load_model, transcribe
+from video_transcribe import transcribe_video_visual
 from visuals import generate_visual_assets
 from word_export import export_summary_to_word
 
@@ -33,7 +34,7 @@ def _format_segment_lines(segments: Any) -> list[str]:
             start = 0.0
             end = 0.0
         text = str(seg.get("text", "")).strip()
-        output.append(f"[{start:07.2f}s - {end:07.2f}s] {text}")
+        output.append(f"[{start:07.2f}s - {end:07.2f}s]  {text}")
     return output
 
 
@@ -46,18 +47,27 @@ def _write_text_transcript(
     media_path: str,
     output_dir: str,
     language: str = "en",
+    transcript_kind: str = "audio",
     output_path: Optional[str] = None,
+    segment_lines: Optional[list[str]] = None,
 ) -> str:
     if output_path:
         out_path = Path(output_path)
     else:
         base_name = Path(media_path).stem
         lang_code = language.lower() if language else "en"
+        kind_code = transcript_kind.lower() if transcript_kind else "audio"
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        out_path = Path(output_dir) / f"{base_name}_transcript_{lang_code}_{timestamp}.txt"
+        out_path = Path(output_dir) / f"{base_name}_transcript_{kind_code}_{lang_code}_{timestamp}.txt"
+
+    payload_lines: list[str] = [transcript_text.strip()]
+    if segment_lines:
+        payload_lines.append("")
+        payload_lines.append("--- Segments ---")
+        payload_lines.extend(segment_lines)
 
     with open(out_path, "w", encoding="utf-8") as handle:
-        handle.write(transcript_text.strip())
+        handle.write("\n".join(payload_lines).strip())
 
     return str(out_path)
 
@@ -91,14 +101,28 @@ def _extract_language_from_transcript_filename(filename: str) -> Optional[str]:
     Expected format: basename_transcript_LANG_TIMESTAMP.txt
     Returns the language code (e.g., 'de', 'en') or None if not found."""
     parts = filename.replace('.txt', '').split('_')
-    # Format: [..., 'transcript', LANG, TIMESTAMP, ...]
+    # Formats:
+    # - basename_transcript_LANG_TIMESTAMP.txt
+    # - basename_transcript_KIND_LANG_TIMESTAMP.txt
     try:
         transcript_idx = parts.index('transcript')
+        if transcript_idx + 2 < len(parts) and parts[transcript_idx + 1] in {"audio", "video", "combined"}:
+            return parts[transcript_idx + 2]
         if transcript_idx + 1 < len(parts):
             return parts[transcript_idx + 1]
     except (ValueError, IndexError):
         pass
     return None
+
+
+def _resolve_transcription_mode(with_video: bool, video_only: bool) -> str:
+    if with_video and video_only:
+        raise ValueError("--with-video und --video-only koennen nicht gleichzeitig gesetzt werden.")
+    if video_only:
+        return "video_only"
+    if with_video:
+        return "audio_video"
+    return "audio_only"
 
 
 def _package_single_media(
@@ -110,6 +134,9 @@ def _package_single_media(
     with_docs: bool,
     no_llm: bool,
     llm_model: str,
+    transcription_mode: str,
+    video_interval_seconds: int,
+    video_max_frames: int,
 ) -> dict[str, Any]:
     media_stem = _slugify(Path(media_path).stem)
     media_out_dir = Path(output_root) / media_stem
@@ -128,36 +155,188 @@ def _package_single_media(
         else:
             lang_for_search = "en"  # Default fallback
 
-    transcript_existing = _latest_matching_file(media_out_dir, f"{base_name}_transcript_{lang_for_search}_*.txt")
+    transcript_existing: Optional[Path]
+    if transcription_mode == "audio_only":
+        transcript_existing = _latest_matching_file(media_out_dir, f"{base_name}_transcript_audio_{lang_for_search}_*.txt")
+        if not transcript_existing:
+            # Backward compatibility with old naming scheme (no kind marker).
+            transcript_existing = _latest_matching_file(media_out_dir, f"{base_name}_transcript_{lang_for_search}_*.txt")
+    elif transcription_mode == "video_only":
+        transcript_existing = _latest_matching_file(media_out_dir, f"{base_name}_transcript_video_{lang_for_search}_*.txt")
+    else:
+        transcript_existing = _latest_matching_file(media_out_dir, f"{base_name}_transcript_combined_{lang_for_search}_*.txt")
     word_existing = _latest_matching_file(media_out_dir, f"{base_name}_summary_*_*.docx") if with_docs else None
     ppt_existing = _latest_matching_file(media_out_dir, f"{base_name}_training_slides_*_*.pptx") if with_docs else None
 
     transcript_text = ""
+    audio_transcript_text = ""
+    video_transcript_text = ""
     segment_lines: list[str] = []
     transcript_path: str
+    audio_transcript_path: Optional[str] = None
+    video_transcript_path: Optional[str] = None
     transcript_status = "generated"
+    video_fallback_used = False
 
-    if transcript_existing and not overwrite:
-        transcript_path = str(transcript_existing)
-        transcript_status = "skipped"
-        print(f"Step: Transcribe | File: {media_path} | SKIPPED (exists, --overwrite disabled): {transcript_path}")
-        transcript_text = transcript_existing.read_text(encoding="utf-8").strip()
-        effective_language = lang_for_search  # Use language from existing file
-    else:
-        transcript_status = "overwritten" if (overwrite and transcript_existing) else "generated"
-        print(f"Step: Transcribe | File: {media_path}")
-        result = transcribe(media_path, model=model, language=language)
-        transcript_text = str(result.get("text", "")).strip()
-        segments = result.get("segments", [])
+    effective_language = language or lang_for_search
+    if transcription_mode == "audio_only":
+        if transcript_existing and not overwrite:
+            transcript_path = str(transcript_existing)
+            transcript_status = "skipped"
+            print(f"Step: Transcribe (Audio) | File: {media_path} | SKIPPED (exists, --overwrite disabled): {transcript_path}")
+            transcript_text = transcript_existing.read_text(encoding="utf-8").strip()
+            audio_transcript_text = transcript_text
+            audio_transcript_path = transcript_path
+            effective_language = lang_for_search
+
+            if not transcript_text:
+                if not github_models_enabled():
+                    raise RuntimeError(
+                        "Audio-Transcript ist leer und Video-Fallback erfordert GitHub Models Token "
+                        "(GITHUB_MODELS_TOKEN/GITHUB_TOKEN/GH_TOKEN)."
+                    )
+                print(f"Step: Transcribe (Video Fallback) | File: {media_path}")
+                visual_result = transcribe_video_visual(
+                    media_path=media_path,
+                    llm_model=llm_model,
+                    language=language,
+                    interval_seconds=video_interval_seconds,
+                    max_frames=video_max_frames,
+                )
+                transcript_text = str(visual_result.get("text", "")).strip()
+                video_transcript_text = transcript_text
+                segments = visual_result.get("segments", [])
+                segment_lines = _format_segment_lines(segments)
+                video_transcript_path = _write_text_transcript(
+                    transcript_text=transcript_text,
+                    media_path=media_path,
+                    output_dir=str(media_out_dir),
+                    language=effective_language,
+                    transcript_kind="video",
+                    segment_lines=segment_lines,
+                )
+                transcript_path = video_transcript_path
+                video_fallback_used = True
+        else:
+            transcript_status = "overwritten" if (overwrite and transcript_existing) else "generated"
+            print(f"Step: Transcribe (Audio) | File: {media_path}")
+            result = transcribe(media_path, model=model, language=language)
+            audio_transcript_text = str(result.get("text", "")).strip()
+            segments = result.get("segments", [])
+            audio_segment_lines = _format_segment_lines(segments)
+
+            if audio_transcript_text:
+                transcript_text = audio_transcript_text
+                segment_lines = audio_segment_lines
+                transcript_path = _write_text_transcript(
+                    transcript_text=transcript_text,
+                    media_path=media_path,
+                    output_dir=str(media_out_dir),
+                    language=effective_language,
+                    transcript_kind="audio",
+                    output_path=str(transcript_existing) if (overwrite and transcript_existing) else None,
+                    segment_lines=segment_lines,
+                )
+                audio_transcript_path = transcript_path
+            else:
+                if not github_models_enabled():
+                    raise RuntimeError(
+                        "Audio-Transcript ist leer und Video-Fallback erfordert GitHub Models Token "
+                        "(GITHUB_MODELS_TOKEN/GITHUB_TOKEN/GH_TOKEN)."
+                    )
+                print(f"Step: Transcribe (Video Fallback) | File: {media_path}")
+                visual_result = transcribe_video_visual(
+                    media_path=media_path,
+                    llm_model=llm_model,
+                    language=language,
+                    interval_seconds=video_interval_seconds,
+                    max_frames=video_max_frames,
+                )
+                transcript_text = str(visual_result.get("text", "")).strip()
+                video_transcript_text = transcript_text
+                segments = visual_result.get("segments", [])
+                segment_lines = _format_segment_lines(segments)
+                video_transcript_path = _write_text_transcript(
+                    transcript_text=transcript_text,
+                    media_path=media_path,
+                    output_dir=str(media_out_dir),
+                    language=effective_language,
+                    transcript_kind="video",
+                    segment_lines=segment_lines,
+                )
+                transcript_path = video_transcript_path
+                video_fallback_used = True
+    elif transcription_mode == "video_only":
+        transcript_status = "generated"
+        print(f"Step: Transcribe (Video) | File: {media_path}")
+        visual_result = transcribe_video_visual(
+            media_path=media_path,
+            llm_model=llm_model,
+            language=language,
+            interval_seconds=video_interval_seconds,
+            max_frames=video_max_frames,
+        )
+        transcript_text = str(visual_result.get("text", "")).strip()
+        video_transcript_text = transcript_text
+        segments = visual_result.get("segments", [])
         segment_lines = _format_segment_lines(segments)
         transcript_path = _write_text_transcript(
             transcript_text=transcript_text,
             media_path=media_path,
             output_dir=str(media_out_dir),
-            language=language or "en",
-            output_path=str(transcript_existing) if (overwrite and transcript_existing) else None,
+            language=effective_language,
+            transcript_kind="video",
+            segment_lines=segment_lines,
         )
-        effective_language = language or "en"
+        video_transcript_path = transcript_path
+    else:
+        print(f"Step: Transcribe (Audio) | File: {media_path}")
+        audio_result = transcribe(media_path, model=model, language=language)
+        audio_transcript_text = str(audio_result.get("text", "")).strip()
+        audio_segments = _format_segment_lines(audio_result.get("segments", []))
+        audio_transcript_path = _write_text_transcript(
+            transcript_text=audio_transcript_text,
+            media_path=media_path,
+            output_dir=str(media_out_dir),
+            language=effective_language,
+            transcript_kind="audio",
+            segment_lines=audio_segments,
+        )
+
+        print(f"Step: Transcribe (Video) | File: {media_path}")
+        visual_result = transcribe_video_visual(
+            media_path=media_path,
+            llm_model=llm_model,
+            language=language,
+            interval_seconds=video_interval_seconds,
+            max_frames=video_max_frames,
+        )
+        video_transcript_text = str(visual_result.get("text", "")).strip()
+        video_segments = _format_segment_lines(visual_result.get("segments", []))
+        video_transcript_path = _write_text_transcript(
+            transcript_text=video_transcript_text,
+            media_path=media_path,
+            output_dir=str(media_out_dir),
+            language=effective_language,
+            transcript_kind="video",
+            segment_lines=video_segments,
+        )
+
+        transcript_text = (
+            "=== Audio Transcript ===\n"
+            + audio_transcript_text.strip()
+            + "\n\n=== Visual Transcript ===\n"
+            + video_transcript_text.strip()
+        ).strip()
+        segment_lines = audio_segments + ["", "--- Visual Segments ---"] + video_segments
+        transcript_path = _write_text_transcript(
+            transcript_text=transcript_text,
+            media_path=media_path,
+            output_dir=str(media_out_dir),
+            language=effective_language,
+            transcript_kind="combined",
+            segment_lines=segment_lines,
+        )
 
     if not transcript_text:
         raise RuntimeError("Transcript text is empty. Cannot continue with packaging.")
@@ -257,9 +436,13 @@ def _package_single_media(
     return {
         "media_path": os.path.abspath(media_path),
         "language": effective_language,
+        "transcription_mode": transcription_mode,
+        "video_fallback_used": video_fallback_used,
         "segment_count": len(segment_lines),
         "artifacts": {
             "transcript": os.path.abspath(transcript_path),
+            "transcript_audio": os.path.abspath(audio_transcript_path) if audio_transcript_path else None,
+            "transcript_video": os.path.abspath(video_transcript_path) if video_transcript_path else None,
             "markdown_summary": os.path.abspath(markdown_path) if markdown_path else None,
             "markdown_ppt": os.path.abspath(ppt_markdown_path) if ppt_markdown_path else None,
             "word_summary": os.path.abspath(word_path) if word_path else None,
@@ -291,8 +474,16 @@ def _package_single_media(
 
 
 def build_training_package(args: argparse.Namespace) -> dict[str, Any]:
-    media_files = _collect_media_files(args.input_path)
-    model = _load_model(args.model, offline=args.offline)
+    transcription_mode = _resolve_transcription_mode(args.with_video, args.video_only)
+    if transcription_mode in {"audio_video", "video_only"} and not github_models_enabled():
+        raise RuntimeError(
+            "Bildbasierte Video-Transkription wurde angefordert, aber kein GitHub Models Token wurde gefunden. "
+            "Bitte GITHUB_MODELS_TOKEN/GITHUB_TOKEN/GH_TOKEN setzen oder ohne --with-video/--video-only ausfuehren."
+        )
+    media_files = _collect_media_files(args.input_path, video_format=args.video_format)
+    model = None
+    if transcription_mode in {"audio_only", "audio_video"}:
+        model = _load_model(args.model, offline=args.offline)
     llm_model = args.llm_model or github_models_model()
     llm_model_source = "cli" if args.llm_model else "env/default"
 
@@ -303,11 +494,7 @@ def build_training_package(args: argparse.Namespace) -> dict[str, Any]:
     else:
         print(f"LLM: requested but no GitHub Models token found | Word/PPT will be skipped | Requested model: {llm_model} | Source: {llm_model_source}")
 
-    if args.output_dir:
-        output_root = Path(args.output_dir)
-    else:
-        input_abs = Path(args.input_path).resolve()
-        output_root = input_abs.parent / "training_package_output"
+    output_root = Path(args.output_dir)
 
     output_root.mkdir(parents=True, exist_ok=True)
 
@@ -316,6 +503,9 @@ def build_training_package(args: argparse.Namespace) -> dict[str, Any]:
         "input_path": os.path.abspath(args.input_path),
         "model": args.model,
         "offline": bool(args.offline),
+        "transcription_mode": transcription_mode,
+        "video_interval_seconds": int(args.video_interval_seconds),
+        "video_max_frames": int(args.video_max_frames),
         "with_docs": bool(args.with_docs),
         "llm_enabled": not bool(args.no_llm),
         "llm_model": llm_model,
@@ -334,6 +524,9 @@ def build_training_package(args: argparse.Namespace) -> dict[str, Any]:
                 with_docs=args.with_docs,
                 no_llm=args.no_llm,
                 llm_model=llm_model,
+                transcription_mode=transcription_mode,
+                video_interval_seconds=args.video_interval_seconds,
+                video_max_frames=args.video_max_frames,
             )
             manifest["results"].append(package)
             print(f"OK: {media_path}")
@@ -370,8 +563,31 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="Whisper model size (default: base)",
     )
     parser.add_argument("--language", default=None, help="Optional language override, e.g. de or en")
-    parser.add_argument("--output-dir", default=None, help="Root output directory for generated artifacts")
+    parser.add_argument("--video-format", default=None, help="Optional video format filter for directory scans, e.g. mp4")
+    parser.add_argument("--output-dir", required=True, help="Root output directory for generated artifacts")
     parser.add_argument("--offline", action="store_true", help="Do not allow model download")
+    parser.add_argument(
+        "--with-video",
+        action="store_true",
+        help="Fuehrt Audio-Transkription und zusaetzlich bildbasierte Video-Transkription aus.",
+    )
+    parser.add_argument(
+        "--video-only",
+        action="store_true",
+        help="Fuehrt nur bildbasierte Video-Transkription aus (ohne Audio-Transkription).",
+    )
+    parser.add_argument(
+        "--video-interval-seconds",
+        type=int,
+        default=8,
+        help="Intervall in Sekunden fuer Frame-Sampling bei Video-Transkription (default: 8).",
+    )
+    parser.add_argument(
+        "--video-max-frames",
+        type=int,
+        default=24,
+        help="Maximale Anzahl von Frames fuer Video-Transkription (default: 24).",
+    )
     parser.add_argument("--with-docs", action="store_true", help="Also generate Word and PowerPoint artifacts from the transcript via LLM")
     parser.add_argument("--no-llm", action="store_true", help="Disable LLM generation and skip Word/PowerPoint artifacts")
     parser.add_argument("--llm-model", default=None, help="GitHub Models model ID (overrides GITHUB_MODELS_MODEL from .env)")
